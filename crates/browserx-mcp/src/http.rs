@@ -5,7 +5,10 @@
 //! (only the digest is configured), the `Origin` header is validated (DNS rebinding), the
 //! default bind is loopback, bodies are capped and in-flight requests are bounded. There are no
 //! sessions and no server-initiated stream (`GET` and `DELETE` answer `405`); an
-//! `Mcp-Session-Id` sent by a client is ignored. TLS is not terminated here: put a reverse proxy
+//! `Mcp-Session-Id` sent by a client is ignored. A request of protocol `2026-07-28` must carry
+//! `MCP-Protocol-Version`, `Mcp-Method` and, for `tools/call`, `prompts/get` and
+//! `resources/read`, `Mcp-Name`, and each must match the body (`-32020`, HTTP 400). No tool
+//! parameter is mirrored into a header. TLS is not terminated here: put a reverse proxy
 //! in front for anything beyond loopback.
 
 use std::net::SocketAddr;
@@ -24,9 +27,12 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+
 use crate::protocol::{
-    INTERNAL_ERROR, INVALID_REQUEST, Incoming, PARSE_ERROR, RpcError, SUPPORTED_VERSIONS,
-    error_frame, parse_incoming, result_frame,
+    HEADER_MISMATCH, INTERNAL_ERROR, INVALID_REQUEST, Incoming, PARSE_ERROR, RpcError, error_frame,
+    parse_incoming, read_meta, result_frame, supported_versions, unsupported_version,
 };
 use crate::server::{Server, Transport};
 
@@ -138,6 +144,80 @@ fn origin_allowed(origin: &str, options: &HttpOptions) -> bool {
         .is_some_and(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]" | "::1"))
 }
 
+/// The value of an `Mcp-Name`-style header, decoding the `=?base64?...?=` form.
+fn header_text(value: &HeaderValue) -> Option<String> {
+    let text = value.to_str().ok()?;
+    match text
+        .strip_prefix("=?base64?")
+        .and_then(|rest| rest.strip_suffix("?="))
+    {
+        Some(encoded) => String::from_utf8(STANDARD.decode(encoded).ok()?).ok(),
+        None => Some(text.to_owned()),
+    }
+}
+
+fn mismatch(message: String) -> RpcError {
+    RpcError::new(HEADER_MISMATCH, message).with_status(400)
+}
+
+/// Checks the request headers against the body, per the protocol era of the request.
+fn validate_headers(
+    headers: &HeaderMap,
+    method: &str,
+    params: Option<&Value>,
+) -> Result<(), RpcError> {
+    let header_version = headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim);
+    let meta = read_meta(params)?;
+    if !meta.modern {
+        if let Some(version) = header_version
+            && !supported_versions().contains(&version)
+        {
+            return Err(unsupported_version(version));
+        }
+        return Ok(());
+    }
+    match header_version {
+        None => {
+            return Err(mismatch(
+                "the MCP-Protocol-Version header is required".into(),
+            ));
+        }
+        Some(version) if version != meta.version => {
+            return Err(mismatch(format!(
+                "Header mismatch: MCP-Protocol-Version header {version:?} does not match the request's {:?}",
+                meta.version
+            )));
+        }
+        Some(_) => {}
+    }
+    let header_method = headers.get("mcp-method").and_then(header_text);
+    if header_method.as_deref() != Some(method) {
+        return Err(mismatch(format!(
+            "Header mismatch: the Mcp-Method header {header_method:?} does not match the method {method:?}"
+        )));
+    }
+    let name_field = match method {
+        "tools/call" | "prompts/get" => Some("name"),
+        "resources/read" => Some("uri"),
+        _ => None,
+    };
+    if let Some(field) = name_field {
+        let body_value = params
+            .and_then(|params| params.get(field))
+            .and_then(Value::as_str);
+        let header_value = headers.get("mcp-name").and_then(header_text);
+        if header_value.as_deref() != body_value {
+            return Err(mismatch(format!(
+                "Header mismatch: the Mcp-Name header {header_value:?} does not match params.{field} {body_value:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn error_response(error: &RpcError, id: &Value) -> Response {
     let status = error
         .http_status
@@ -227,20 +307,6 @@ async fn endpoint(
             );
         }
     }
-    if let Some(version) = headers
-        .get("mcp-protocol-version")
-        .and_then(|value| value.to_str().ok())
-        && !SUPPORTED_VERSIONS.contains(&version.trim())
-    {
-        return respond(
-            StatusCode::BAD_REQUEST,
-            &error_frame(
-                &Value::Null,
-                &RpcError::new(INVALID_REQUEST, "unsupported MCP-Protocol-Version")
-                    .with_data(json!({"supported": SUPPORTED_VERSIONS, "requested": version})),
-            ),
-        );
-    }
     let value: Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(error) => {
@@ -267,6 +333,9 @@ async fn endpoint(
         }
         Ok(Incoming::Request { id, method, params }) => (id, method, params),
     };
+    if let Err(error) = validate_headers(&headers, &rpc_method, params.as_ref()) {
+        return error_response(&error, &id);
+    }
     let Ok(_permit) = state.permits.try_acquire() else {
         return respond(
             StatusCode::TOO_MANY_REQUESTS,
@@ -280,6 +349,10 @@ async fn endpoint(
     let transport = Transport {
         name: "http",
         remote: Some(peer.ip().to_string()),
+        principal: Some(format!(
+            "http:{}",
+            hex::encode(&state.options.token_sha256[..8])
+        )),
     };
     match state.server.handle(&rpc_method, params, &transport).await {
         Ok(result) => respond(StatusCode::OK, &result_frame(&id, result)),

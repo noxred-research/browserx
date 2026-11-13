@@ -280,6 +280,7 @@ dependencies = [
  "hex",
  "rand 0.10.3",
  "reqwest",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -341,6 +342,7 @@ dependencies = [
 name = "browserx-mcp"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "axum",
  "base64 0.22.1",
  "browserx-cdp",

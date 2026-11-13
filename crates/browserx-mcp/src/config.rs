@@ -78,6 +78,138 @@ pub struct Config {
     /// Existing sessions this server may browse, with the file that holds each token.
     #[serde(default)]
     pub adopt: Vec<AdoptConfig>,
+    /// The operator key file that signs manifests, scope grants and approvals.
+    #[serde(default)]
+    pub operator: Option<OperatorSection>,
+    /// The signed engagement manifest.
+    #[serde(default)]
+    pub manifest: Option<ManifestSection>,
+    /// The signed scope grant.
+    #[serde(default)]
+    pub grant: Option<GrantSection>,
+    /// Out-of-band approvals and the approval lifetime.
+    #[serde(default)]
+    pub approvals: ApprovalsSection,
+    /// The action safety profile and the Rule-of-Two policy.
+    #[serde(default)]
+    pub safety: SafetySection,
+}
+
+/// `[operator]`: the key file for signatures.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorSection {
+    /// File with one `key_id = <hex>` line per operator key (at least 16 bytes each).
+    pub keys_file: PathBuf,
+}
+
+/// `[manifest]`: the signed engagement manifest.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestSection {
+    /// The manifest (`engagement.toml`).
+    pub path: PathBuf,
+    /// The detached signature; default: the manifest path plus `.sig`.
+    #[serde(default)]
+    pub signature_file: Option<PathBuf>,
+}
+
+/// `[grant]`: the signed scope grant.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantSection {
+    /// The grant (`grant.toml`).
+    pub path: PathBuf,
+    /// The detached signature; default: the grant path plus `.sig`.
+    #[serde(default)]
+    pub signature_file: Option<PathBuf>,
+}
+
+/// `[approvals]`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ApprovalsSection {
+    /// Directory of pending and signed out-of-band approvals; default: `approvals` beside the
+    /// audit log.
+    pub dir: Option<PathBuf>,
+    /// How long an approval request stays valid, in seconds.
+    pub ttl_secs: u64,
+}
+
+impl Default for ApprovalsSection {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            ttl_secs: 300,
+        }
+    }
+}
+
+/// How the Rule of Two is applied when untrusted input, sensitive context and a consequential
+/// capability meet in one session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleOfTwoMode {
+    /// Not applied.
+    Off,
+    /// Recorded in the audit log and shown, never blocking.
+    #[default]
+    Warn,
+    /// Every consequential call needs an approval.
+    Enforce,
+    /// Every consequential call is refused.
+    Strict,
+}
+
+impl RuleOfTwoMode {
+    /// The name used in configuration and output.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Warn => "warn",
+            Self::Enforce => "enforce",
+            Self::Strict => "strict",
+        }
+    }
+}
+
+/// `[safety]`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SafetySection {
+    /// The action profile applied to element interactions.
+    pub profile: crate::classifier::Profile,
+    /// The Rule-of-Two policy.
+    pub rule_of_two: RuleOfTwoSection,
+}
+
+impl Default for SafetySection {
+    fn default() -> Self {
+        Self {
+            profile: crate::classifier::Profile::TestEnvironment,
+            rule_of_two: RuleOfTwoSection::default(),
+        }
+    }
+}
+
+/// `[safety.rule_of_two]`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RuleOfTwoSection {
+    /// `off`, `warn` (default for configurations that do not set it), `enforce` or `strict`.
+    pub mode: RuleOfTwoMode,
+    /// Treat loopback, private and link-local targets as sensitive context.
+    pub private_network_is_sensitive: bool,
+}
+
+impl Default for RuleOfTwoSection {
+    fn default() -> Self {
+        Self {
+            mode: RuleOfTwoMode::default(),
+            private_network_is_sensitive: true,
+        }
+    }
 }
 
 /// `[server]`: the BrowserX server.
@@ -445,6 +577,35 @@ impl Config {
         for adopt in &mut self.adopt {
             fix(&mut adopt.token_file);
         }
+        if let Some(operator) = &mut self.operator {
+            fix(&mut operator.keys_file);
+        }
+        if let Some(manifest) = &mut self.manifest {
+            fix(&mut manifest.path);
+            if let Some(file) = &mut manifest.signature_file {
+                fix(file);
+            }
+        }
+        if let Some(grant) = &mut self.grant {
+            fix(&mut grant.path);
+            if let Some(file) = &mut grant.signature_file {
+                fix(file);
+            }
+        }
+        if let Some(dir) = &mut self.approvals.dir {
+            fix(dir);
+        }
+    }
+
+    /// The directory of out-of-band approvals.
+    #[must_use]
+    pub fn approvals_dir(&self) -> PathBuf {
+        self.approvals.dir.clone().unwrap_or_else(|| {
+            self.audit
+                .path
+                .parent()
+                .map_or_else(|| PathBuf::from("approvals"), |dir| dir.join("approvals"))
+        })
     }
 
     /// Whether `capability` is enabled.
@@ -567,6 +728,17 @@ impl Config {
         if !self.adopt.is_empty() && !self.has(Capability::Browse) {
             return Err(bad("[[adopt]] needs the `browse` capability"));
         }
+        if (self.manifest.is_some() || self.grant.is_some()) && self.operator.is_none() {
+            return Err(bad(
+                "[manifest] and [grant] need [operator] keys_file: signatures are checked with the operator's keys",
+            ));
+        }
+        if self.grant.is_some() && !self.has(Capability::Browse) {
+            return Err(bad("[grant] needs the `browse` capability"));
+        }
+        if !(30..=3600).contains(&self.approvals.ttl_secs) {
+            return Err(bad("approvals.ttl_secs must be 30..=3600"));
+        }
         Ok(())
     }
 
@@ -624,7 +796,7 @@ impl Config {
                  timeouts (1..=300 s) and log sizes (10..=10000)",
             ));
         }
-        if self.has(Capability::Browse) && browse.require_scope {
+        if self.has(Capability::Browse) && browse.require_scope && self.manifest.is_none() {
             let blank =
                 |value: &Option<String>| value.as_deref().is_none_or(|v| v.trim().is_empty());
             if browse.allowed_origins.is_empty() {

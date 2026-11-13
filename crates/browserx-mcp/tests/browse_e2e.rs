@@ -254,7 +254,9 @@ async fn an_agent_browses_an_authorized_site_through_mcp() {
         "{page}"
     );
     assert!(
-        page.starts_with(&format!("<untrusted_page_content origin=\"{allowed}\">")),
+        page.starts_with(&format!(
+            "<untrusted_page_content origin=\"{allowed}\" nonce=\""
+        )),
         "{page}"
     );
 
@@ -408,11 +410,11 @@ async fn an_agent_browses_an_authorized_site_through_mcp() {
     assert_eq!(hostile["isError"], false);
     let hostile_text = untrusted_body(&mcp.tool("page_text", json!({"session_id": id})).await);
     assert_eq!(
-        hostile_text.matches("</untrusted_page_content>").count(),
+        hostile_text.matches("</untrusted_page_content").count(),
         1,
         "{hostile_text}"
     );
-    assert!(hostile_text.ends_with("</untrusted_page_content>"));
+    assert!(hostile_text.ends_with("\">"), "{hostile_text}");
     assert!(hostile_text.contains("<\\/untrusted_page_content"));
 
     // Out of scope: refused before the browser is touched; a redirect out of scope is caught
@@ -656,7 +658,11 @@ async fn browsing_works_through_the_scoped_relay_of_a_shared_browser_session() {
     assert!(text.contains("Welcome to page two"), "{text}");
     let tabs = untrusted_body(&mcp.tool("list_tabs", json!({"session_id": id})).await);
     assert_eq!(
-        tabs.lines().filter(|l| l.starts_with('t')).count(),
+        tabs.lines()
+            .filter(|l| l
+                .split_once("| ")
+                .is_some_and(|(_, rest)| rest.starts_with('t')))
+            .count(),
         1,
         "{tabs}"
     );

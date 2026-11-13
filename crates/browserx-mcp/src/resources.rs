@@ -97,13 +97,22 @@ pub fn list(ctx: &Ctx) -> Vec<Value> {
 /// The `resources/templates/list` entries.
 #[must_use]
 pub fn templates() -> Vec<Value> {
-    vec![json!({
-        "uriTemplate": "browserx://sessions/{id}",
-        "name": "session",
-        "title": "Session lease view",
-        "description": "The lease view of one session (never its token or CDP URL).",
-        "mimeType": "application/json",
-    })]
+    vec![
+        json!({
+            "uriTemplate": "browserx://sessions/{id}",
+            "name": "session",
+            "title": "Session lease view",
+            "description": "The lease view of one session (never its token or CDP URL).",
+            "mimeType": "application/json",
+        }),
+        json!({
+            "uriTemplate": "browserx://screenshots/{id}",
+            "name": "screenshot",
+            "title": "Screenshot",
+            "description": "A recent screenshot returned as a resource link by the screenshot tool. Only the most recent ones are kept.",
+            "mimeType": "image/png",
+        }),
+    ]
 }
 
 /// Reads a resource.
@@ -119,6 +128,12 @@ pub async fn read(ctx: &Ctx, uri: &str) -> Result<Vec<Value>, ReadError> {
             .ok_or(ReadError::NotFound)?;
         return Ok(vec![
             json!({ "uri": uri, "mimeType": "text/markdown", "text": doc.text }),
+        ]);
+    }
+    if uri.starts_with(crate::shots::URI_PREFIX) {
+        let data = ctx.shots.get(uri).ok_or(ReadError::NotFound)?;
+        return Ok(vec![
+            json!({ "uri": uri, "mimeType": "image/png", "blob": data }),
         ]);
     }
     if let Some(raw) = uri.strip_prefix(SESSIONS_PREFIX) {

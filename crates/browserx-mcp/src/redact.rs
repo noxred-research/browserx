@@ -138,6 +138,10 @@ impl Redactor {
     /// `text` with known secrets and credential shapes replaced.
     #[must_use]
     pub fn text(&self, text: &str) -> String {
+        #[cfg(feature = "fault-injection")]
+        if crate::faults::active(crate::faults::Fault::Redaction) {
+            return text.to_owned();
+        }
         let mut out = text.to_owned();
         for secret in &self.secrets {
             if out.contains(secret.as_str()) {

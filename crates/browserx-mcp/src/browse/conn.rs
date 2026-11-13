@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 
 use super::Limits;
 use super::ax::Refs;
+use super::snapshot::SnapshotStore;
 use crate::error::{ToolError, ToolResult};
 use crate::safety::Scope;
 
@@ -67,10 +68,12 @@ pub(super) struct Tab {
     pub title: String,
     pub main_frame: Option<String>,
     pub loading: bool,
-    pub blocked: Option<String>,
+    /// Origin and reason code of the last main-document request the scope blocked.
+    pub blocked: Option<(String, &'static str)>,
     pub loads: u64,
     pub navigations: u64,
     pub refs: Refs,
+    pub snaps: SnapshotStore,
     pub net: VecDeque<NetEntry>,
     pub console: VecDeque<ConsoleEntry>,
 }
@@ -190,11 +193,19 @@ impl Shared {
                 .main_frame
                 .as_deref()
                 .is_none_or(|main| p["frameId"].as_str() == Some(main));
-        let allow = !main_document || self.scope.allows_navigation(url);
-        if !allow {
-            tab.blocked = Some(url::Url::parse(url).map_or_else(
-                |_| "an unparsable URL".to_owned(),
-                |u| u.origin().ascii_serialization(),
+        let refusal = if main_document {
+            self.scope.navigation_refusal(url)
+        } else {
+            None
+        };
+        let allow = refusal.is_none();
+        if let Some(refusal) = refusal {
+            tab.blocked = Some((
+                url::Url::parse(url).map_or_else(
+                    |_| "an unparsable URL".to_owned(),
+                    |u| u.origin().ascii_serialization(),
+                ),
+                refusal.code(),
             ));
         }
         Some(Paused {
@@ -351,6 +362,7 @@ impl Shared {
                     tab.url = frame["url"].as_str().unwrap_or("").to_owned();
                     tab.navigations += 1;
                     tab.refs.clear();
+                    tab.snaps.clear();
                 }
             }
             "Page.navigatedWithinDocument" => {
@@ -429,11 +441,14 @@ impl Drop for Conn {
 }
 
 /// The refusal for a navigation the scope guard stopped before it left the browser.
-pub(super) fn blocked_error(origin: &str) -> ToolError {
-    ToolError::refused(format!(
-        "the page tried to load {origin}, which is outside the authorized scope: the request was blocked before it was sent \
-         and the tab stays on its previous page"
-    ))
+pub(super) fn blocked_error(origin: &str, code: &str) -> ToolError {
+    ToolError::refused_with(
+        code,
+        format!(
+            "the page tried to load {origin}, which is outside the authorized scope: the request was blocked before it was sent \
+             and the tab stays on its previous page"
+        ),
+    )
 }
 
 fn map_cdp(error: browserx_cdp::CdpError) -> ToolError {
@@ -793,8 +808,8 @@ impl Conn {
         min_wait: Duration,
     ) -> ToolResult<(String, bool)> {
         let settled = self.wait_settled(tab, min_wait).await;
-        if let Some(origin) = self.take_blocked(tab) {
-            return Err(blocked_error(&origin));
+        if let Some((origin, code)) = self.take_blocked(tab) {
+            return Err(blocked_error(&origin, code));
         }
         let url = self.current_url(tab).await?;
         if url.starts_with("chrome-error://") {
@@ -814,7 +829,7 @@ impl Conn {
     }
 
     /// The origin of a navigation the scope guard blocked since the last call, if any.
-    pub(super) fn take_blocked(&self, tab: &TabRef) -> Option<String> {
+    pub(super) fn take_blocked(&self, tab: &TabRef) -> Option<(String, &'static str)> {
         self.shared
             .state()
             .tab_mut(tab.num)
@@ -1082,7 +1097,13 @@ mod tests {
         assert!(!blocked.allow);
         assert_eq!(blocked.command().0, "Fetch.failRequest");
         assert_eq!(
-            shared.state().tab(1).unwrap().blocked.as_deref(),
+            shared
+                .state()
+                .tab(1)
+                .unwrap()
+                .blocked
+                .as_ref()
+                .map(|(origin, _)| origin.as_str()),
             Some("http://evil.test")
         );
         // Frames of other origins and subresources are page content.
@@ -1098,7 +1119,7 @@ mod tests {
         );
         assert!(paused("http://site.test/a", "Document", "F", "UNKNOWN").is_none());
         assert_eq!(
-            blocked_error("http://evil.test").kind,
+            blocked_error("http://evil.test", "out_of_scope").kind,
             crate::error::FailKind::Refused
         );
     }

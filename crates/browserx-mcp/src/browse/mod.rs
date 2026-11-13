@@ -4,8 +4,10 @@
 mod act;
 mod ax;
 mod conn;
+mod features;
 mod page;
 mod scripts;
+mod snapshot;
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -19,6 +21,7 @@ pub use act::{ActionOutcome, Direction, ScrollRequest, SelectBy};
 pub use ax::parse_ref;
 pub use conn::{Conn, TabRef};
 pub use page::{NetFilter, WaitFor};
+pub use snapshot::{FindQuery, MAX_FIND_LIMIT, SnapshotRequest};
 
 use crate::backend::Backend;
 use crate::config::BrowseSection;

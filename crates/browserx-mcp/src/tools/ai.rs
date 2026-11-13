@@ -7,14 +7,14 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
-use super::browse::{open, origin_of};
+use super::browse::{open, origin_of, read_gate};
 use super::monitor::assessment;
 use super::{Args, Output, session_id};
 use crate::ctx::Ctx;
 use crate::error::{ToolError, ToolResult};
 use crate::explain;
 use crate::llm::{Llm, LlmError, SYSTEM_RULES};
-use crate::safety::wrap_untrusted;
+use crate::safety::{new_nonce, wrap_untrusted};
 use crate::schema;
 
 fn llm(ctx: &Ctx) -> ToolResult<&Llm> {
@@ -69,9 +69,14 @@ pub(crate) fn extractive_summary(title: &str, text: &str) -> (String, Vec<String
     (summary, points)
 }
 
-pub(super) async fn summarize_page(ctx: &Arc<Ctx>, args: &Args) -> ToolResult {
+pub(super) async fn summarize_page(
+    ctx: &Arc<Ctx>,
+    call: &super::Call<'_>,
+    args: &Args,
+) -> ToolResult {
     let llm = llm(ctx)?;
-    let (handle, id, tab) = open(ctx, args).await?;
+    let (handle, id, tab) = open(ctx, call, args).await?;
+    read_gate(ctx, call, "summarize_page", &handle, &tab)?;
     let budget = llm.max_input_chars().min(ctx.cfg.browse.max_chars_cap);
     let page = handle.page_text(&tab, budget).await?;
     let origin = origin_of(&page.url);
@@ -79,7 +84,7 @@ pub(super) async fn summarize_page(ctx: &Arc<Ctx>, args: &Args) -> ToolResult {
     let focus = args.str("focus").unwrap_or("the page's main content");
     let prompt = format!(
         "Summarize the page content below. Focus: {focus}.\n{}",
-        wrap_untrusted(&origin, &ctx.redactor.text(&page.text))
+        wrap_untrusted(&origin, &ctx.redactor.text(&page.text), &new_nonce())
     );
     let schema = json!({
         "type": "object",
@@ -228,7 +233,11 @@ pub(crate) fn heuristic_extract(schema: &Value, text: &str) -> (Map<String, Valu
     (data, missing)
 }
 
-pub(super) async fn extract_data(ctx: &Arc<Ctx>, args: &Args) -> ToolResult {
+pub(super) async fn extract_data(
+    ctx: &Arc<Ctx>,
+    call: &super::Call<'_>,
+    args: &Args,
+) -> ToolResult {
     let llm = llm(ctx)?;
     let wanted = args
         .0
@@ -242,14 +251,15 @@ pub(super) async fn extract_data(ctx: &Arc<Ctx>, args: &Args) -> ToolResult {
             "`schema` must be a JSON Schema of type object with properties",
         ));
     }
-    let (handle, id, tab) = open(ctx, args).await?;
+    let (handle, id, tab) = open(ctx, call, args).await?;
+    read_gate(ctx, call, "extract_data", &handle, &tab)?;
     let budget = llm.max_input_chars().min(ctx.cfg.browse.max_chars_cap);
     let page = handle.page_text(&tab, budget).await?;
     let origin = origin_of(&page.url);
     let instructions = args.str("instructions").unwrap_or("");
     let prompt = format!(
         "Extract the data described by the JSON Schema from the page content below. Use null or omit what the page does not state; never invent values. {instructions}\nSchema: {wanted}\n{}",
-        wrap_untrusted(&origin, &ctx.redactor.text(&page.text))
+        wrap_untrusted(&origin, &ctx.redactor.text(&page.text), &new_nonce())
     );
     let answer = llm
         .complete_json("page_extract", SYSTEM_RULES, &prompt, &wanted, false)

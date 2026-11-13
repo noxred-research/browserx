@@ -3,6 +3,9 @@
 
 use serde_json::{Value, json};
 
+use crate::approvals::ApprovalNeed;
+use crate::safety::Refusal;
+
 /// A failure that stops the MCP server from starting or running.
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
@@ -46,6 +49,8 @@ pub enum FailKind {
     Refused,
     /// A rate limit was hit.
     RateLimited,
+    /// The call needs a human approval first; it did not run.
+    ApprovalRequired,
     /// The BrowserX server answered with an error or could not be reached.
     Backend,
     /// The browser or the page failed (CDP error, timeout, stale reference).
@@ -64,6 +69,7 @@ impl FailKind {
             Self::InvalidArguments => "invalid_arguments",
             Self::Refused => "refused",
             Self::RateLimited => "rate_limited",
+            Self::ApprovalRequired => "approval_required",
             Self::Backend => "backend_error",
             Self::Browser => "browser_error",
             Self::NotConfigured => "not_configured",
@@ -81,6 +87,8 @@ pub struct ToolError {
     pub message: String,
     /// Optional structured detail (for example the BrowserX error code).
     pub detail: Option<Value>,
+    /// What a human is asked to approve, when the kind is [`FailKind::ApprovalRequired`].
+    pub approval: Option<Box<ApprovalNeed>>,
 }
 
 impl ToolError {
@@ -90,7 +98,37 @@ impl ToolError {
             kind,
             message: message.into(),
             detail: None,
+            approval: None,
         }
+    }
+
+    /// The safety model refused, with a stable reason code recorded in the audit log.
+    pub fn refused_with(code: &str, message: impl Into<String>) -> Self {
+        Self::refused(message).with_detail(json!({ "reason": code }))
+    }
+
+    /// The call needs a human approval before it can run.
+    #[must_use]
+    pub fn approval_required(need: ApprovalNeed) -> Self {
+        let mut error = Self::new(
+            FailKind::ApprovalRequired,
+            format!(
+                "this {} action needs a human approval before it runs ({})",
+                need.class,
+                need.reasons.join(", ")
+            ),
+        );
+        error.approval = Some(Box::new(need));
+        error
+    }
+
+    /// The reason code of a refusal, when one is attached.
+    #[must_use]
+    pub fn reason(&self) -> Option<&str> {
+        self.detail
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .and_then(Value::as_str)
     }
 
     /// The arguments are wrong.
@@ -143,6 +181,12 @@ impl std::fmt::Display for ToolError {
 }
 
 impl std::error::Error for ToolError {}
+
+impl From<Refusal> for ToolError {
+    fn from(refusal: Refusal) -> Self {
+        Self::refused_with(refusal.code(), refusal.0)
+    }
+}
 
 impl From<browserx_core::Error> for ToolError {
     fn from(error: browserx_core::Error) -> Self {

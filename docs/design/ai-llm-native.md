@@ -8,7 +8,7 @@ BrowserX is *next-generation AI/LLM-native browser pooling, session management, 
 
 Three consequences follow from that sentence.
 
-1. **Authority lives in configuration, not in prompts.** Which tools exist, which origins a browser may visit, when an engagement starts and ends, which proxy routes are selectable and how fast tools may run are all set in a file the operator controls. A model cannot widen them by asking, by being persuasive or by being tricked by a web page.
+1. **Authority lives in configuration, not in prompts.** Which tools exist, which origins a browser may visit, when an engagement starts and ends, which proxy routes are selectable and how fast tools may run are all set in files the operator controls, and the rules of engagement in files the operator signs. A model cannot widen them by asking, by being persuasive or by being tricked by a web page.
 2. **The browser pool does not depend on a model.** Admission, fencing, expiry, health checks, recovery, snapshots, handoff and the relay's refusal rules are the same code with or without an agent. If the model endpoint is down, nothing in the pool changes; the advisory tools fall back to deterministic answers.
 3. **Everything an agent does is accountable.** Every tool call is written to a hash-chained audit log together with the operator and the authorization the engagement runs under.
 
@@ -36,9 +36,24 @@ Explanation is deterministic. The statement "this session came back as `restored
 | Secrets | Lease tokens, CDP URLs, API keys, model keys and proxy credentials never enter tool output, prompts or the audit log; proxies are chosen by name from configuration | A prompt injection has nothing to exfiltrate |
 | Destructive calls | `release_session` and `handoff_session` need `confirm: true` | One mistaken call does not end a session |
 | Rate and size | Per-tool calls per minute, a result byte budget per call, 4 MiB messages, bounded in-flight requests, bounded tabs and logs | A looping agent cannot flood the pool or its own context |
-| Page content is data | All page-derived text is redacted, then wrapped in `<untrusted_page_content origin="...">` with the wrapper's own tags neutralized inside the text | A page cannot close the wrapper and continue "outside" it |
+| Consequential actions | An action class derived from the page by fixed code, a profile table (allow, approval, deny) and a human approval bound to the exact action | A page cannot talk the agent into an unreviewed deletion, credential entry or message; `confirm: true` is not an approval |
+| Rules of engagement | An operator-signed engagement manifest (hosts as `attack`, `visit` or `blocked`, protected requests, impact ceiling, limits, windows) and an optional signed scope grant (read-only and read-write origins, tools, actions, budgets, a plan) | Unsigned or altered documents are inert and the page-changing tools are unlisted; a grant wider than its ceiling stops the server from starting |
+| Rule of Two | A per-handle ledger of untrusted input read (A), sensitive context (B) and a page-changing tool (C); flags never turn off | When all three meet, a consequential call needs an approval or is refused (`enforce`, `strict`) |
+| Page content is data | All page-derived text is redacted, then wrapped in `<untrusted_page_content origin="..." nonce="...">` with a per-call random nonce in the closing tag and as a prefix of every line, and the wrapper's own tags, marker and nonce neutralized inside the text | A page cannot close the wrapper and continue "outside" it |
 
 The scope check is the one most worth understanding. A policy that only inspected the page after it loaded would already have sent a request to the out-of-scope origin. The MCP server therefore asks the browser to hold every top-level document request (`Fetch.requestPaused`) until it has compared the URL with the scope, and fails the request when it is outside. Sub-frames and sub-resources are page content and are not held: a page in scope may embed a widget from elsewhere, as it could for any visitor. The check after the page settles is a second line for the rare case that interception is unavailable.
+
+## Models advise, the gate decides
+
+Tools that change a page pass one deterministic gate, written as ordinary code and judged without a model:
+
+1. **Action class.** Fixed code reads what the page says about an element (role, accessible name, the form it submits, the URL it opens) and derives a class: `read`, `navigate_in_scope`, `navigate_out_of_scope`, `form_edit`, `submit_state_change`, `credential_entry`, `external_communication`, `destructive`, `payment`, `file_transfer` or `unknown`. Structure comes first; a multilingual word table can only raise the class; contradictory evidence gives the stricter one.
+2. **Profile.** `[safety] profile` maps each class to allow, approval or deny. The default, `test_environment`, allows form edits and state changes in a test environment, asks a human before credential entry, external communication, destructive actions, file transfers and unknown effects, and denies payments and leaving the scope.
+3. **Rules of engagement.** An operator-signed **engagement manifest** lists the hosts that may be attacked, only visited or never touched, protects request patterns, sets an impact ceiling (`observe`, `probe`, `demonstrate`), limits and recurring windows. An optional signed **scope grant** narrows a session further: read-only and read-write origins, tools, action classes, budgets and an ordered plan. A model may *propose* a grant, and a proposal can only narrow. An unsigned or altered document widens nothing: the tools that change pages disappear from the list and are refused.
+4. **The Rule of Two.** A ledger per session handle sets three flags that only turn on: **A** untrusted input was read, **B** sensitive context is in play (persistent state, a proxy route, an adopted session, a private-network target), **C** a tool that changes pages is enabled. With all three set, a consequential call is allowed with a warning, needs an approval or is refused, according to `[safety.rule_of_two] mode`.
+5. **A human approval**, when one is needed, bound to the exact action by a digest, valid once and for a short time. A client that supports elicitation shows a form; any other client gets an approval id the operator signs with `browserx mcp approvals approve`. `confirm: true` is a statement of intent by the model and never an approval.
+
+Every step has a stable reason code, and the audit log records the class, the Rule of Two flags, the manifest's digest and state and the reason of each refusal. The details are in the [MCP server guide](../guides/mcp.md#the-action-gate).
 
 ## Why the data path stays deterministic
 
@@ -58,10 +73,12 @@ The consequence for safety reviews is simple: the question "what can the agent d
 Be precise about the residual risks before you enable the powerful capabilities.
 
 - **Prompt injection is mitigated, not solved.** Wrapping page content and instructing the model to treat it as data reduces the chance that a hostile page steers the agent; it does not remove it. The hard limits above are what holds when a model is steered: out-of-scope requests are refused, secrets are not present, destructive calls need confirmation.
-- **In-scope sites can still mislead an agent.** An agent with `interact` can click, type and submit forms on in-scope origins, including actions with side effects. Give it scopes and accounts you would hand to a careful junior colleague, not production systems you cannot afford to have changed.
+- **In-scope sites can still mislead an agent.** An agent with `interact` can click, type and submit forms on in-scope origins, including actions with side effects. The action gate puts a human in front of the riskiest classes, but it only knows what the page says about a control: a plain button whose script does something invisible is classed `unknown`. Give the agent scopes and accounts you would hand to a careful junior colleague, not production systems you cannot afford to have changed.
 - **`evaluate_js` is a sharp tool.** Script in the page can read everything the page can and can call other origins with `fetch`; the scope guard covers top-level navigation, not requests a script makes. It is off unless the operator adds `evaluate` to `mcp.capabilities`.
 - **Third-party content inside a page is not scope-checked.** Sub-frames and sub-resources load as the page asks.
 - **The audit log detects tampering, not truncation.** The hash chain proves that entries were not edited, removed or reordered, but cutting entries off the end leaves a valid chain. Store the last hash that `browserx mcp audit verify` prints somewhere the host cannot rewrite, or set the append-only attribute on the file.
+- **Approvals are only as good as the client that shows them.** The server can ask for an approval; it cannot make a client put the question in front of a person. A client that answers elicitation requests by itself defeats that route, while the out-of-band route needs the operator's signature.
+- **The ledger is not persistent.** Handles, plan progress and pending multi round-trip approvals live in the server's memory; a restart forgets them, and there is no high-availability mode.
 - **Plaintext transport.** The HTTP transport does not terminate TLS. Keep it on loopback or put TLS and access control in front of it.
 - **A model endpoint sees what you send it.** If `[ai]` is configured, summaries and extraction send redacted page content, and `diagnose` sends the deterministic findings, to that endpoint. Use an endpoint you are permitted to send that data to.
 

@@ -63,6 +63,55 @@ authorization_note = "Written authorization, ticket SEC-1234, scope document v3"
 # not_before = "2026-01-05T00:00:00Z"
 # not_after = "2026-03-31T23:59:59Z"
 
+[safety]
+# What may happen to an element the agent acts on. Fixed code classifies the action (read,
+# form_edit, submit_state_change, credential_entry, external_communication, destructive,
+# payment, file_transfer, unknown, ...); the profile decides allow, approval or deny.
+#   read_only                 look and navigate in scope; nothing else
+#   test_environment          edits and state changes allowed; credentials, outbound messages,
+#                             deletions, file transfers and unknown effects need an approval;
+#                             payments are denied (the default)
+#   authorized_security_test  like test_environment, but an unknown effect is allowed
+profile = "test_environment"
+
+[safety.rule_of_two]
+# A session handle that read untrusted page content (A), has sensitive context (B: persistent
+# state, a proxy route, an adopted session or a private-network target) and can change pages
+# (C: interact or evaluate enabled) is gated: off | warn | enforce | strict.
+#   enforce  a consequential call needs a human approval
+#   strict   a consequential call is refused until reset_context
+# An absent section means "warn" for existing configurations; new installs should enforce.
+mode = "enforce"
+private_network_is_sensitive = true
+
+[approvals]
+# Out-of-band approvals wait here for `browserx mcp approvals approve <id>`. Default: an
+# `approvals` directory beside the audit log.
+# dir = "./approvals"
+ttl_secs = 300                   # how long an approval request stays valid (30 to 3600)
+
+# Optional: signed rules of engagement. Signatures are checked with operator keys
+# (`browserx mcp operator-key new <id> >> operator.keys`, mode 0600). Without [operator], only
+# clients that can ask the user through the protocol (elicitation) can get approvals.
+#
+# [operator]
+# keys_file = "./operator.keys"
+#
+# The engagement manifest (engagement.toml): hosts as attack | visit | blocked, protected
+# requests, impact ceiling, limits and windows. Sign it with
+# `browserx mcp manifest sign engagement.toml --keys operator.keys`. An unsigned or altered
+# manifest is inert and the tools that change pages are refused. A signed manifest replaces
+# the origin, operator and note requirement of [browse] and [engagement] above.
+# [manifest]
+# path = "./engagement.toml"
+# signature_file = "./engagement.toml.sig"      # default: path + ".sig"
+#
+# A scope grant (grant.toml): read-only and read-write origins, tools, actions, budgets, plan.
+# The server refuses to start when it is unsigned or wider than the manifest and [browse].
+# [grant]
+# path = "./grant.toml"
+# signature_file = "./grant.toml.sig"           # default: path + ".sig"
+
 [sessions]
 max_tracked = 4                  # sessions this server controls at once
 default_ttl_secs = 900

@@ -5,16 +5,18 @@
 //! remembers each element's role and name; interactions re-resolve the reference against the
 //! live tree and refuse it when either changed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::rc::Rc;
 
 use serde_json::Value;
 
+use super::snapshot::{Found, MAX_NODES, SnapLine};
+
 /// Most references one page may hold; further elements are listed without one.
 const MAX_REFS: u32 = 10_000;
 /// Deepest nesting rendered.
-const MAX_DEPTH: usize = 40;
+pub(super) const MAX_DEPTH: usize = 40;
 /// Longest accessible name rendered.
 const MAX_NAME_CHARS: usize = 160;
 /// Longest value rendered.
@@ -226,16 +228,22 @@ fn is_interactive(role: &str, node: &Value) -> bool {
 /// A rendered snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rendered {
-    /// The text.
+    /// The text (within the character budget).
     pub text: String,
     /// Title of the page (the root's name).
     pub title: String,
-    /// Lines rendered.
+    /// Lines in `text`.
     pub lines: usize,
     /// References now live on the page.
     pub refs: usize,
-    /// The text was cut at the character budget.
+    /// The text was cut at the character budget or the node cap.
     pub truncated: bool,
+    /// Every rendered node, in order (at most [`MAX_NODES`]): the snapshot the diff works on.
+    pub nodes: Vec<SnapLine>,
+    /// Nodes rendered in all, including those past the node cap.
+    pub total: usize,
+    /// Nodes left out because the page hides them from users.
+    pub hidden_omitted: usize,
 }
 
 /// Rendering options.
@@ -247,17 +255,53 @@ pub struct Options {
     pub interactive_only: bool,
 }
 
-struct Frame<'a> {
+struct Pending<'a> {
     node: &'a Value,
     depth: usize,
     parent_name: Rc<str>,
+    frame: Option<Rc<str>>,
 }
 
-/// Renders `nodes` (the `nodes` array of `Accessibility.getFullAXTree`), assigning references.
+#[derive(Default)]
+struct Collector {
+    nodes: Vec<SnapLine>,
+    total: usize,
+    synthetic: i64,
+}
+
+impl Collector {
+    fn push(&mut self, key: Option<i64>, depth: usize, text: String, found: Option<Found>) {
+        self.total += 1;
+        if self.nodes.len() >= MAX_NODES {
+            return;
+        }
+        let key = key.unwrap_or_else(|| {
+            self.synthetic += 1;
+            i64::MIN + self.synthetic
+        });
+        let reference = found.as_ref().map(|f| f.number);
+        self.nodes.push(SnapLine {
+            key,
+            depth,
+            text,
+            reference,
+            found,
+        });
+    }
+}
+
+/// Renders `nodes` (the `nodes` array of `Accessibility.getFullAXTree`, with the trees of
+/// captured frames merged in by [`super::snapshot`]), assigning references. Nodes whose backend
+/// id is in `hidden` are left out and counted.
 #[must_use]
-pub fn render(nodes: &[Value], refs: &mut Refs, options: Options) -> Rendered {
+pub fn render(
+    nodes: &[Value],
+    refs: &mut Refs,
+    options: Options,
+    hidden: &HashSet<i64>,
+) -> Rendered {
     let mut by_id: HashMap<&str, &Value> = HashMap::with_capacity(nodes.len());
-    let mut children_of: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut children_of: HashSet<&str> = HashSet::new();
     for node in nodes {
         if let Some(id) = node.get("nodeId").and_then(Value::as_str) {
             by_id.insert(id, node);
@@ -284,26 +328,24 @@ pub fn render(nodes: &[Value], refs: &mut Refs, options: Options) -> Rendered {
         })
         .collect();
 
-    let mut out = Rendered {
-        text: String::new(),
-        title: String::new(),
-        lines: 0,
-        refs: 0,
-        truncated: false,
-    };
-    let mut stack: Vec<Frame<'_>> = roots
+    let mut out = Collector::default();
+    let mut title = String::new();
+    let mut hidden_omitted = 0usize;
+    let mut stack: Vec<Pending<'_>> = roots
         .into_iter()
         .rev()
-        .map(|node| Frame {
+        .map(|node| Pending {
             node,
             depth: 0,
             parent_name: Rc::from(""),
+            frame: None,
         })
         .collect();
-    while let Some(Frame {
+    while let Some(Pending {
         node,
         depth,
         parent_name,
+        frame,
     }) = stack.pop()
     {
         let ignored = node
@@ -311,43 +353,84 @@ pub fn render(nodes: &[Value], refs: &mut Refs, options: Options) -> Rendered {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let (role, name) = role_and_name(node);
+        let backend = node.get("backendDOMNodeId").and_then(Value::as_i64);
+        let is_hidden = backend.is_some_and(|b| hidden.contains(&b));
         let mut child_depth = depth;
         let mut child_parent_name = Rc::clone(&parent_name);
+        let mut child_frame = frame.clone();
         let mut descend = true;
         if !ignored && depth <= MAX_DEPTH {
             match role.as_str() {
                 "InlineTextBox" | "LineBreak" => descend = false,
                 "RootWebArea" | "WebArea" => {
-                    if out.title.is_empty() {
-                        out.title.clone_from(&name);
+                    if node.get("x_inline").is_some() {
+                        // The content document of a frame: the frame line above stands for it.
+                    } else {
+                        if title.is_empty() {
+                            title.clone_from(&name);
+                        }
+                        if !options.interactive_only {
+                            out.push(backend, depth, format!("page \"{name}\""), None);
+                        }
+                        child_depth = depth + 1;
                     }
-                    if !options.interactive_only {
-                        emit(&mut out, options, &format!("page \"{name}\""), depth);
-                    }
-                    child_depth = depth + 1;
                 }
                 "StaticText" => {
                     descend = false;
                     let covered = !name.is_empty() && parent_name.contains(name.as_str());
-                    if !name.is_empty() && !covered && !options.interactive_only {
-                        emit(&mut out, options, &format!("text \"{name}\""), depth);
+                    if !name.is_empty() && !covered {
+                        if is_hidden {
+                            hidden_omitted += 1;
+                        } else if !options.interactive_only {
+                            out.push(backend, depth, format!("text \"{name}\""), None);
+                        }
                     }
+                }
+                "Iframe" | "IframePresentational" if node.get("x_frame").is_some() => {
+                    let info = &node["x_frame"];
+                    let origin = info["origin"].as_str().unwrap_or("unknown");
+                    let note = info["note"].as_str();
+                    if is_hidden {
+                        hidden_omitted += 1;
+                    } else if note.is_some() || !options.interactive_only {
+                        let mut line = format!("frame \"{origin}\"");
+                        if let Some(note) = note {
+                            let _ = write!(line, " ({note})");
+                        }
+                        out.push(backend, depth, line, None);
+                    }
+                    child_depth = depth + 1;
+                    child_parent_name = Rc::from("");
+                    child_frame = Some(Rc::from(origin));
                 }
                 r if TRANSPARENT_ROLES.contains(&r) || (r == "group" && name.is_empty()) => {}
                 r => {
-                    let backend = node.get("backendDOMNodeId").and_then(Value::as_i64);
-                    let reference = if is_interactive(r, node) {
-                        backend.and_then(|b| refs.assign(b, r, &name))
+                    if is_hidden {
+                        hidden_omitted += 1;
                     } else {
-                        None
-                    };
-                    if reference.is_some() || !options.interactive_only {
-                        emit(
-                            &mut out,
-                            options,
-                            &describe(r, &name, node, reference),
-                            depth,
-                        );
+                        let found = if is_interactive(r, node) {
+                            backend
+                                .and_then(|b| refs.assign(b, r, &name))
+                                .map(|number| Found {
+                                    number,
+                                    role: r.to_owned(),
+                                    name: name.clone(),
+                                    value: normalize(text_of(node, "value"), MAX_VALUE_CHARS),
+                                    frame: frame.as_ref().map(|f| f.to_string()),
+                                })
+                        } else {
+                            None
+                        };
+                        if found.is_some() || !options.interactive_only {
+                            let mut line =
+                                describe(r, &name, node, found.as_ref().map(|f| f.number));
+                            if options.interactive_only
+                                && let Some(origin) = &frame
+                            {
+                                let _ = write!(line, " (in frame \"{origin}\")");
+                            }
+                            out.push(backend, depth, line, found);
+                        }
                     }
                     child_depth = depth + 1;
                     child_parent_name = Rc::from(name.as_str());
@@ -356,14 +439,11 @@ pub fn render(nodes: &[Value], refs: &mut Refs, options: Options) -> Rendered {
         } else if !ignored {
             descend = false;
         }
-        if out.truncated {
-            break;
-        }
         if descend {
             let kids = node.get("childIds").and_then(Value::as_array);
             for child in kids.into_iter().flatten().rev() {
                 if let Some(child) = child.as_str().and_then(|id| by_id.get(id)) {
-                    stack.push(Frame {
+                    stack.push(Pending {
                         node: child,
                         depth: if options.interactive_only {
                             0
@@ -371,13 +451,28 @@ pub fn render(nodes: &[Value], refs: &mut Refs, options: Options) -> Rendered {
                             child_depth
                         },
                         parent_name: Rc::clone(&child_parent_name),
+                        frame: child_frame.clone(),
                     });
                 }
             }
         }
     }
-    out.refs = refs.len();
-    out
+    let composed = compose(
+        out.nodes.iter().map(|n| (n.depth, n.text.as_str())),
+        out.total,
+        options.max_chars,
+        options.interactive_only,
+    );
+    Rendered {
+        text: composed.text,
+        title,
+        lines: composed.shown,
+        refs: refs.len(),
+        truncated: composed.truncated,
+        nodes: out.nodes,
+        total: out.total,
+        hidden_omitted,
+    }
 }
 
 fn describe(role: &str, name: &str, node: &Value, reference: Option<u32>) -> String {
@@ -400,28 +495,68 @@ fn describe(role: &str, name: &str, node: &Value, reference: Option<u32>) -> Str
     line
 }
 
-fn emit(out: &mut Rendered, options: Options, line: &str, depth: usize) {
-    let indent = if options.interactive_only {
-        0
-    } else {
-        depth.min(MAX_DEPTH) * 2
-    };
-    let needed = indent + line.chars().count() + 1;
-    if out.text.chars().count() + needed > options.max_chars {
-        out.truncated = true;
-        let _ = write!(
-            out.text,
-            "[truncated at {} characters: narrow with interactive_only or raise max_chars]",
-            options.max_chars
-        );
-        return;
+/// Text assembled from lines under a character budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Composed {
+    /// The text, notice included.
+    pub text: String,
+    /// Lines in it.
+    pub shown: usize,
+    /// Lines were left out.
+    pub truncated: bool,
+}
+
+/// Joins `(depth, text)` lines into at most `max_chars` characters. `total` is how many lines
+/// exist (it may exceed the lines given when the node cap was hit); the notice says how many were
+/// not shown.
+#[must_use]
+pub fn compose<'a>(
+    lines: impl Iterator<Item = (usize, &'a str)>,
+    total: usize,
+    max_chars: usize,
+    interactive_only: bool,
+) -> Composed {
+    let mut text = String::new();
+    let mut chars = 0usize;
+    let mut shown = 0usize;
+    let mut over_budget = false;
+    for (depth, line) in lines {
+        let indent = if interactive_only {
+            0
+        } else {
+            depth.min(MAX_DEPTH) * 2
+        };
+        let needed = indent + line.chars().count() + 1;
+        if chars + needed > max_chars {
+            over_budget = true;
+            break;
+        }
+        text.extend(std::iter::repeat_n(' ', indent));
+        text.push_str(line);
+        text.push('\n');
+        chars += needed;
+        shown += 1;
     }
-    for _ in 0..indent {
-        out.text.push(' ');
+    let missing = total.saturating_sub(shown);
+    let truncated = missing > 0;
+    if truncated {
+        if over_budget {
+            let _ = write!(
+                text,
+                "[truncated at {max_chars} characters: {missing} more nodes not shown; narrow with interactive_only/find_in_snapshot or raise max_chars]"
+            );
+        } else {
+            let _ = write!(
+                text,
+                "[node cap reached: at most {MAX_NODES} nodes are kept per snapshot; {missing} more nodes not shown; narrow with interactive_only/find_in_snapshot]"
+            );
+        }
     }
-    out.text.push_str(line);
-    out.text.push('\n');
-    out.lines += 1;
+    Composed {
+        text,
+        shown,
+        truncated,
+    }
 }
 
 #[cfg(test)]
@@ -483,7 +618,7 @@ mod tests {
     #[test]
     fn renders_roles_names_values_states_and_assigns_refs_to_interactive_nodes() {
         let mut refs = Refs::default();
-        let out = render(&tree(), &mut refs, options(false));
+        let out = render(&tree(), &mut refs, options(false), &HashSet::new());
         assert_eq!(out.title, "Shop");
         let expected = "page \"Shop\"\n  heading \"Welcome\"\n  text \"Free shipping\"\n  [e1] link \"Cart\"\n  \
                         [e2] textbox \"Search\" value=\"boots\" (required)\n  [e3] button \"Add\"\n  [e4] button \"Hidden parent child\"\n";
@@ -495,10 +630,10 @@ mod tests {
     #[test]
     fn references_are_stable_across_snapshots_and_reset_on_clear() {
         let mut refs = Refs::default();
-        let _ = render(&tree(), &mut refs, options(false));
+        let _ = render(&tree(), &mut refs, options(false), &HashSet::new());
         let mut reordered = tree();
         reordered.swap(5, 7);
-        let again = render(&reordered, &mut refs, options(false));
+        let again = render(&reordered, &mut refs, options(false), &HashSet::new());
         assert_eq!(refs.lookup(1).unwrap().role, "link");
         assert_eq!(refs.lookup(3).unwrap().name, "Add");
         assert_eq!(again.refs, 4);
@@ -510,7 +645,7 @@ mod tests {
     #[test]
     fn interactive_only_lists_just_referenced_elements() {
         let mut refs = Refs::default();
-        let out = render(&tree(), &mut refs, options(true));
+        let out = render(&tree(), &mut refs, options(true), &HashSet::new());
         assert_eq!(
             out.text,
             "[e1] link \"Cart\"\n[e2] textbox \"Search\" value=\"boots\" (required)\n[e3] button \"Add\"\n[e4] button \"Hidden parent child\"\n"
@@ -527,6 +662,7 @@ mod tests {
                 max_chars: 60,
                 interactive_only: false,
             },
+            &HashSet::new(),
         );
         assert!(out.truncated);
         assert!(out.text.contains("truncated at 60 characters"));

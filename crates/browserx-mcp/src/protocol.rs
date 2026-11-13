@@ -1,8 +1,16 @@
 //! JSON-RPC 2.0 framing and the Model Context Protocol envelope.
 //!
-//! Protocol revisions `2025-06-18` (preferred) and `2025-03-26` are served. The server keeps no
-//! per-connection protocol state: `initialize` only negotiates the version it echoes back, so the
-//! same engine serves stdio and streamable HTTP.
+//! Protocol revisions `2026-07-28`, `2025-06-18` and `2025-03-26` are served by one engine.
+//!
+//! * **Modern** (`2026-07-28`): stateless. Every request carries its protocol version and the
+//!   client's capabilities in `params._meta`, results carry `resultType`, lists carry `ttlMs`
+//!   and `cacheScope`, and there is no handshake. A tool that needs a human answers with
+//!   `input_required` and the client retries.
+//! * **Legacy** (`2025-06-18`, `2025-03-26`): `initialize` first. The server keeps no
+//!   per-connection state, so the handshake only negotiates the version it echoes back.
+//!
+//! The era of a request is a property of the request, never of the connection, so the same
+//! server answers both on stdio and on streamable HTTP.
 
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
@@ -17,15 +25,168 @@ pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 /// The server failed or is saturated.
 pub const INTERNAL_ERROR: i64 = -32603;
-/// A requested resource does not exist.
+/// A requested resource does not exist (legacy revisions).
 pub const RESOURCE_NOT_FOUND: i64 = -32002;
+/// HTTP headers do not match the request body (`2026-07-28`).
+pub const HEADER_MISMATCH: i64 = -32020;
+/// The request needs a client capability that was not declared (`2026-07-28`).
+pub const MISSING_CAPABILITY: i64 = -32021;
+/// The requested protocol version is not served (`2026-07-28`).
+pub const UNSUPPORTED_VERSION: i64 = -32022;
 
 /// Largest accepted message. A longer stdio line is discarded up to its newline and answered
 /// with [`INVALID_REQUEST`], so a runaway client cannot grow the server's memory.
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
-/// Protocol versions served, newest first.
-pub const SUPPORTED_VERSIONS: [&str; 2] = ["2025-06-18", "2025-03-26"];
+/// Protocol versions that use per-request metadata and no handshake.
+pub const MODERN_VERSIONS: [&str; 1] = ["2026-07-28"];
+/// Protocol versions that use the `initialize` handshake, newest first.
+pub const LEGACY_VERSIONS: [&str; 2] = ["2025-06-18", "2025-03-26"];
+
+/// `_meta` key carrying the protocol version of a request.
+pub const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+/// `_meta` key carrying the client identity.
+pub const META_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
+/// `_meta` key carrying the client capabilities.
+pub const META_CLIENT_CAPS: &str = "io.modelcontextprotocol/clientCapabilities";
+/// `_meta` key carrying the server identity in results.
+pub const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
+
+/// Every version served, newest first.
+#[must_use]
+pub fn supported_versions() -> Vec<&'static str> {
+    MODERN_VERSIONS
+        .iter()
+        .chain(LEGACY_VERSIONS.iter())
+        .copied()
+        .collect()
+}
+
+/// What a request's `_meta` says about the protocol in use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestMeta {
+    /// The request uses per-request metadata (`2026-07-28`).
+    pub modern: bool,
+    /// The protocol version of the request.
+    pub version: String,
+    /// Client name, when sent.
+    pub client_name: Option<String>,
+    /// Client version, when sent.
+    pub client_version: Option<String>,
+    /// The client declared the `elicitation` capability (only knowable for modern requests).
+    pub elicitation: bool,
+    /// The trace id of a valid W3C `traceparent` in `_meta`.
+    pub trace_id: Option<String>,
+}
+
+impl RequestMeta {
+    /// Meta of a request without protocol metadata: legacy semantics.
+    #[must_use]
+    pub fn legacy() -> Self {
+        Self {
+            modern: false,
+            version: LEGACY_VERSIONS[0].to_owned(),
+            client_name: None,
+            client_version: None,
+            elicitation: false,
+            trace_id: None,
+        }
+    }
+}
+
+/// The trace id (32 lowercase hex digits) of a W3C `traceparent`, when it is well formed.
+#[must_use]
+pub fn trace_id_of(traceparent: &str) -> Option<String> {
+    let mut parts = traceparent.trim().split('-');
+    let (version, trace, span, flags) =
+        (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    let hex = |text: &str, len: usize| {
+        text.len() == len
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    (hex(version, 2)
+        && version != "ff"
+        && hex(trace, 32)
+        && trace.bytes().any(|b| b != b'0')
+        && hex(span, 16)
+        && span.bytes().any(|b| b != b'0')
+        && hex(flags, 2))
+    .then(|| trace.to_owned())
+}
+
+fn client_identity(info: Option<&Value>) -> (Option<String>, Option<String>) {
+    let text = |key: &str| {
+        info.and_then(|info| info.get(key))
+            .and_then(Value::as_str)
+            .map(|text| text.chars().take(128).collect::<String>())
+    };
+    (text("name"), text("version"))
+}
+
+/// Reads and validates the per-request metadata.
+///
+/// A request with a protocol version in `_meta` is served per that revision; one without is
+/// served with legacy semantics.
+///
+/// # Errors
+/// [`UNSUPPORTED_VERSION`] for a version the server does not serve, `INVALID_PARAMS` (HTTP 400)
+/// for a modern request without `clientCapabilities`.
+pub fn read_meta(params: Option<&Value>) -> Result<RequestMeta, RpcError> {
+    let Some(meta) = params
+        .and_then(|params| params.get("_meta"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(RequestMeta::legacy());
+    };
+    let (client_name, client_version) = client_identity(meta.get(META_CLIENT_INFO));
+    let trace_id = meta
+        .get("traceparent")
+        .and_then(Value::as_str)
+        .and_then(trace_id_of);
+    let Some(version) = meta.get(META_VERSION) else {
+        let mut legacy = RequestMeta::legacy();
+        legacy.client_name = client_name;
+        legacy.client_version = client_version;
+        legacy.trace_id = trace_id;
+        return Ok(legacy);
+    };
+    let Some(version) = version.as_str() else {
+        return Err(
+            RpcError::invalid_params(format!("`_meta.{META_VERSION}` must be a string"))
+                .with_status(400),
+        );
+    };
+    let modern = MODERN_VERSIONS.contains(&version);
+    if !modern && !LEGACY_VERSIONS.contains(&version) {
+        return Err(unsupported_version(version));
+    }
+    let capabilities = meta.get(META_CLIENT_CAPS).and_then(Value::as_object);
+    if modern && capabilities.is_none() {
+        return Err(RpcError::invalid_params(format!(
+            "`_meta.{META_CLIENT_CAPS}` is required and must be an object"
+        ))
+        .with_status(400));
+    }
+    Ok(RequestMeta {
+        modern,
+        version: version.to_owned(),
+        client_name,
+        client_version,
+        elicitation: modern
+            && capabilities.is_some_and(|c| c.get("elicitation").is_some_and(Value::is_object)),
+        trace_id,
+    })
+}
+
+/// The error for a version the server does not serve, listing the versions it does.
+#[must_use]
+pub fn unsupported_version(requested: &str) -> RpcError {
+    RpcError::new(UNSUPPORTED_VERSION, "Unsupported protocol version")
+        .with_data(json!({ "supported": supported_versions(), "requested": requested }))
+        .with_status(400)
+}
 
 /// A JSON-RPC error object with the HTTP status the HTTP transport answers with.
 #[derive(Debug, Clone, PartialEq)]

@@ -60,6 +60,7 @@ impl Engine {
         let transport = Transport {
             name: "stdio",
             remote: None,
+            principal: None,
         };
         let outcome = tokio::select! {
             () = token.cancelled() => None,
