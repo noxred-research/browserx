@@ -27,6 +27,7 @@ pub mod approvals;
 mod assess;
 pub mod audit;
 mod backend;
+pub mod backends;
 mod browse;
 pub mod classifier;
 mod cli;

@@ -14,6 +14,7 @@ How BrowserX works and why. Read these to understand the guarantees before you r
 | [Recovery](design/recovery.md) | The four attach outcomes, health monitoring, relaunch, startup reconciliation |
 | [Handoff](design/handoff.md) | Moving control of a live session to another client without losing the browser |
 | [Isolation and security](design/isolation-and-security.md) | Dedicated and shared isolation, the scoped relay, credentials, threat model and limits |
+| [Backends](design/backends.md) | Which databases, object stores, caches and streams BrowserX can use, why each family is in or out, how services are shared, what happens when one fails |
 | [Egress](design/egress.md) | The loopback forwarder, destination policy, upstream proxies, sticky exits |
 | [AI/LLM-native](design/ai-llm-native.md) | What agents can do, the safety model, and why the data path stays deterministic |
 
@@ -28,6 +29,7 @@ How to do things.
 | [API reference](guides/api.md) | HTTP routes, bodies, errors, the CDP relay |
 | [CLI reference](guides/cli.md) | Every `browserx` command and flag |
 | [MCP server](guides/mcp.md) | `browserx mcp`: stdio and HTTP setup, configuration, the tool catalog, resources, prompts, the audit log, typical sessions |
+| [Backends](guides/backends.md) | PostgreSQL, MariaDB, S3-compatible stores, Valkey, Redis, ClickHouse, Kafka, RabbitMQ, OpenSearch and Elasticsearch: configuration, shared instances, tests |
 | [Integrating CDP clients](guides/cdp-clients.md) | Attaching a client, reconnecting, handing off, reading the outcome |
 | [Using an upstream proxy](guides/upstream-proxy.md) | `proxy` in the session spec, username templates, sticky exits, CONNECT-only gateways |
 | [Custom launch profiles and browser builds](guides/launch-profiles.md) | Choosing an executable, flags and environment per profile |

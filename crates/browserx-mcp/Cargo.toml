@@ -28,6 +28,12 @@ toml.workspace = true
 tracing.workspace = true
 url.workspace = true
 rand.workspace = true
+redis.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+lapin.workspace = true
+rskafka.workspace = true
+hmac.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 browserx-egress.workspace = true

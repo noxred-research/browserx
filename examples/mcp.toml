@@ -121,12 +121,38 @@ max_ttl_secs = 3600
 # Hash-chained JSONL, created with mode 0600. Verify: `browserx mcp audit verify <path>`.
 path = "./mcp-audit.jsonl"
 
+# Optional copies of the audit log (see docs/guides/mcp.md#audit-export). The file stays authoritative.
+# [analytics]                      # ClickHouse over HTTP
+# url = "https://clickhouse.internal:8443"
+# database = "browserx"
+# user = "browserx"
+# password_file = "./clickhouse.pw"    # or BROWSERX_ANALYTICS_PASSWORD
+# [events]                         # kind = "kafka" | "amqp" | "none"
+# kind = "kafka"
+# brokers = ["kafka-1.internal:9093"]
+# tls = true
+# [search]                         # OpenSearch or Elasticsearch
+# kind = "opensearch"
+# url = "https://search.internal:9200"
+# username = "browserx"
+# password_file = "./search.pw"        # or BROWSERX_SEARCH_PASSWORD
+
 [limits]
 sample_interval_secs = 15        # background metrics samples for rates
 # Calls per minute by tool (defaults: monitoring/browse/interact 120, sessions/ai 20, evaluate 30).
 [limits.per_minute]
 click = 60
 evaluate_js = 10
+
+# Optional: Valkey or Redis, so several MCP servers share their per-tool limits and engagement
+# budgets. Without it each server counts in memory. When the cache is down the in-memory limits
+# apply; a limit is never relaxed. The password comes from a file or BROWSERX_CACHE_PASSWORD.
+# [cache]
+# url = "rediss://cache.internal:6380"
+# key_prefix = "browserx:"
+# username = "browserx"
+# password_file = "./cache-password"
+# tls_ca_file = "./cache-ca.pem"
 
 # Optional: any chat-completions compatible endpoint for summarize_page, extract_data and
 # diagnose. Without it those tools are not listed and everything else works. The model sees
@@ -150,3 +176,25 @@ username = "pool-session-{session}"
 # [[adopt]]
 # session_id = "ses_0123456789abcdef0123456789abcdef"
 # token_file = "./adopted-session.token"
+
+# Optional backends. Each is described in docs/guides/backends.md; secrets come from files
+# or the environment, never from URLs.
+#
+# Shared rate limits and call budgets across several MCP servers (Valkey or Redis):
+# [cache]
+# url = "rediss://cache.example.test:6379"
+# key_prefix = "browserx:"
+# password_file = "./cache-password"
+#
+# Copies of the audit log (the local hash-chained file stays authoritative):
+# [analytics]                       # ClickHouse
+# url = "http://clickhouse.example.test:8123"
+# database = "browserx"
+# [events]                          # kafka | amqp | none
+# kind = "kafka"
+# brokers = ["kafka.example.test:9092"]
+# topic_prefix = "browserx."
+# [search]                          # opensearch | elasticsearch
+# kind = "opensearch"
+# url = "https://search.example.test:9200"
+# index_prefix = "browserx-"

@@ -6,9 +6,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use browserx_core::{Error, Result, SystemClock};
+use browserx_core::{LeaseStore, SnapshotStore};
 use browserx_pool::Pool;
 use browserx_runtime::{ChromiumRuntime, discover_chromium};
-use browserx_store::{FileSnapshotStore, Sealer, SqliteLeaseStore};
+use browserx_store::{
+    Engine, FileSnapshotStore, MariaDbLeaseStore, PostgresLeaseStore, S3SnapshotStore, Sealer,
+    SqliteLeaseStore,
+};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -56,18 +60,60 @@ fn load_sealer(cfg: &Config) -> Result<Sealer> {
     Ok(sealer)
 }
 
+/// Opens the lease registry the configuration names: SQLite in `state_dir` by default.
+async fn open_lease_store(cfg: &Config) -> Result<Arc<dyn LeaseStore>> {
+    let Some(database) = &cfg.database else {
+        return Ok(Arc::new(SqliteLeaseStore::open(&cfg.storage.db_path())?));
+    };
+    let clock = Arc::new(SystemClock);
+    match database.engine()? {
+        Engine::Sqlite => {
+            let path = database
+                .sqlite_path()
+                .unwrap_or_else(|| cfg.storage.db_path());
+            Ok(Arc::new(SqliteLeaseStore::open(&path)?))
+        }
+        Engine::Postgres => {
+            let store = PostgresLeaseStore::connect(database, clock).await?;
+            tracing::info!(engine = "postgresql", "lease registry connected");
+            Ok(Arc::new(store))
+        }
+        Engine::MariaDb => {
+            let store = MariaDbLeaseStore::connect(database, clock).await?;
+            tracing::info!(engine = "mariadb", "lease registry connected");
+            Ok(Arc::new(store))
+        }
+    }
+}
+
+/// Opens the snapshot store the configuration names: files in `state_dir` by default.
+async fn open_snapshot_store(cfg: &Config) -> Result<Arc<dyn SnapshotStore>> {
+    let Some(object_store) = &cfg.object_store else {
+        return Ok(Arc::new(FileSnapshotStore::new(
+            cfg.storage.snapshots_dir(),
+        )?));
+    };
+    let store = S3SnapshotStore::connect(object_store)?;
+    store.ping().await?;
+    tracing::info!(store = %store.profile_summary(), "snapshot store connected");
+    Ok(Arc::new(store))
+}
+
 /// Builds the scheduler and the HTTP state from a validated configuration.
 ///
 /// Leftovers of a previous worker (browsers, scratch directories, session
 /// download directories) are swept before anything launches.
 pub async fn build(cfg: &Config) -> Result<(Pool, AppState)> {
     let storage = &cfg.storage;
-    for dir in [
-        &storage.state_dir,
-        &storage.snapshots_dir(),
-        &storage.profiles_dir(),
-        &storage.temp_dir(),
-    ] {
+    let mut dirs = vec![
+        storage.state_dir.clone(),
+        storage.profiles_dir(),
+        storage.temp_dir(),
+    ];
+    if cfg.object_store.is_none() {
+        dirs.push(storage.snapshots_dir());
+    }
+    for dir in &dirs {
         create_private_dir(dir)?;
     }
     reset_downloads_dir(&storage.downloads_dir())?;
@@ -80,14 +126,14 @@ pub async fn build(cfg: &Config) -> Result<(Pool, AppState)> {
         removed_dirs = report.removed_dirs,
         "swept leftover browsers"
     );
-    let leases = SqliteLeaseStore::open(&storage.db_path())?;
-    let snapshots = FileSnapshotStore::new(storage.snapshots_dir())?;
+    let leases = open_lease_store(cfg).await?;
+    let snapshots = open_snapshot_store(cfg).await?;
     let sealer = load_sealer(cfg)?;
     let pool = Pool::new(
         cfg.pool_config()?,
         Arc::new(runtime),
-        Arc::new(leases),
-        Arc::new(snapshots),
+        leases,
+        snapshots,
         Arc::new(sealer),
         Arc::new(SystemClock),
         cfg.egress.clone(),

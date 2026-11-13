@@ -29,6 +29,12 @@ pub struct Config {
     pub session: SessionSection,
     /// On-disk state.
     pub storage: StorageSection,
+    /// Where leases are kept: SQLite in `storage.state_dir` unless set (PostgreSQL, MariaDB or
+    /// a SQLite file elsewhere).
+    pub database: Option<browserx_store::DatabaseConfig>,
+    /// Where sealed snapshots are kept: `storage.state_dir/snapshots` unless set (an S3-API
+    /// object store).
+    pub object_store: Option<browserx_store::ObjectStoreConfig>,
     /// Browser health monitoring.
     pub health: HealthSection,
     /// Destination policy for browser traffic.
@@ -286,6 +292,16 @@ impl Config {
             return bad("max_connections and ops_max_connections must be positive".into());
         }
         self.check_key_files_outside_state_dir()?;
+        if let Some(database) = &self.database {
+            database
+                .validate()
+                .map_err(|e| Error::InvalidRequest(format!("configuration: [database] {e}")))?;
+        }
+        if let Some(object_store) = &self.object_store {
+            object_store
+                .validate()
+                .map_err(|e| Error::InvalidRequest(format!("configuration: [object_store] {e}")))?;
+        }
         if self.auth.api_keys.is_empty() {
             return bad(
                 "at least one [[auth.api_keys]] entry is required (create one with `browserx keys new <name>`)"

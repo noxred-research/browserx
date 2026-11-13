@@ -1,12 +1,10 @@
 //! Exclusive ownership of a browser profile directory.
 
-use std::fs::{DirBuilder, File, OpenOptions};
-use std::io::ErrorKind;
+use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use browserx_core::{Error, Result};
-use fs4::fs_std::FileExt;
 
 /// File inside the profile directory that carries the lock.
 const LOCK_FILE: &str = ".browserx.lock";
@@ -37,16 +35,13 @@ impl ProfileLock {
             .mode(0o600)
             .open(dir.join(LOCK_FILE))
             .map_err(|e| Error::Storage(format!("cannot open profile lock file: {e}")))?;
-        match FileExt::try_lock_exclusive(&file) {
-            Ok(true) => Ok(Self {
+        match file.try_lock() {
+            Ok(()) => Ok(Self {
                 file,
                 dir: dir.to_path_buf(),
             }),
-            Ok(false) => Err(Error::ProfileLocked(dir.display().to_string())),
-            Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                Err(Error::ProfileLocked(dir.display().to_string()))
-            }
-            Err(err) => Err(Error::Storage(format!(
+            Err(TryLockError::WouldBlock) => Err(Error::ProfileLocked(dir.display().to_string())),
+            Err(TryLockError::Error(err)) => Err(Error::Storage(format!(
                 "cannot lock profile directory: {err}"
             ))),
         }
@@ -63,7 +58,7 @@ impl Drop for ProfileLock {
     fn drop(&mut self) {
         // Closing the descriptor releases the lock regardless; unlocking first
         // just makes the release explicit.
-        let _ = FileExt::unlock(&self.file);
+        let _ = self.file.unlock();
     }
 }
 

@@ -1,6 +1,8 @@
 //! Conformance suites shared by every store implementation.
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+pub mod services;
+
 use std::sync::Arc;
 
 use browserx_core::Clock;
