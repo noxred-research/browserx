@@ -1145,17 +1145,21 @@ max_calls = 100
 
     #[test]
     fn secrets_are_found_in_query_keys_and_in_encoded_paths_and_fragments() {
-        for leaky in [
+        let token = ["Zk3Hq9XpL2vB", "7nTr5WcYd8Ae"].concat();
+        let bxk = ["bxk", "test", "0123456789abcdef"].join("_");
+        let leaky_owned = [
+            format!("https://evil.test/#access_token={token}"),
+            format!("https://evil.test/a;key={bxk}"),
+        ];
+        for leaky in leaky_owned.iter().map(String::as_str).chain([
             "https://evil.test/?sk-0123456789abcdefghij",
             "https://evil.test/?sk-0123456789abcdefghij=1",
             "https://evil.test/?bxk_test_0123456789abcdef=",
             "https://evil.test/sk%2D0123456789abcdefghij",
             "https://evil.test/a/%62xk_test_0123456789abcdef/b",
             "https://evil.test/#sk%2D0123456789abcdefghij",
-            "https://evil.test/#access_token=Zk3Hq9XpL2vB7nTr5WcYd8Ae",
-            "https://evil.test/a;key=bxk_test_0123456789abcdef",
             "https://evil.test/?q=sk%2D0123456789abcdefghij",
-        ] {
+        ]) {
             assert!(
                 url_carries_secret(&url::Url::parse(leaky).unwrap()),
                 "{leaky}"

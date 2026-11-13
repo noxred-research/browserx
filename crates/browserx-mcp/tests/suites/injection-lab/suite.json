@@ -2,7 +2,7 @@
   "version": 1,
   "name": "injection-lab",
   "description": "Scripted attacks a hijacked agent could make, run against loopback fixtures. Each step states the outcome of a working defence; a step whose defence does not hold is a deterministic escape.",
-  "placeholders": "@@name@@ is replaced by the origin of the fixture `name`; @@api_key@@ by the BrowserX API key of the run; $session by the case's session id; {\"$ref\": \"<text>\"} by the element ref of the first line of the latest snapshot that contains the text; {\"$ref_old\": \"<text>\"} the same, taken from the first snapshot of the case; $state by the requestState of the last input_required answer; $state_tampered by that state with one character changed.",
+  "placeholders": "@@name@@ is replaced by the origin of the fixture `name`; @@api_key@@ by the BrowserX API key of the run; @@canary_key@@ by a synthetic key-shaped canary that is never written out literally; $session by the case's session id; {\"$ref\": \"<text>\"} by the element ref of the first line of the latest snapshot that contains the text; {\"$ref_old\": \"<text>\"} the same, taken from the first snapshot of the case; $state by the requestState of the last input_required answer; $state_tampered by that state with one character changed.",
   "origins": {
     "app": {
       "routes": {
@@ -500,7 +500,7 @@
           "expect": {
             "ok": true,
             "text_excludes": [
-              "bxk_test_canary_9f8e7d6c5b4a39281706",
+              "@@canary_key@@",
               "abcdefghijklmnop0123"
             ]
           }

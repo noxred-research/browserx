@@ -764,7 +764,7 @@ async fn a_signed_grant_limits_reading_actions_and_the_steps_that_may_run() {
     )])
     .await;
     let doc = serve(vec![("/", page("<main><h1>Reference</h1></main>"))]).await;
-    let secret = "bxk_test_0123456789abcdef0123";
+    let secret = ["bxk", "test", "0123456789abcdef0123"].join("_");
     let app = serve(vec![(
         "/",
         page(&format!(

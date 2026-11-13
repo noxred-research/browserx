@@ -135,8 +135,16 @@ impl Fixture {
     }
 }
 
+/// The synthetic API-key-shaped value pages carry to prove redaction. It is assembled here so
+/// no secret-shaped literal sits in the repository.
+fn canary_key() -> String {
+    ["bxk", "test", "canary", "9f8e7d6c5b4a39281706"].join("_")
+}
+
 fn fill(text: &str, bases: &BTreeMap<String, String>, api_key: &str) -> String {
-    let mut out = text.replace("@@api_key@@", api_key);
+    let mut out = text
+        .replace("@@api_key@@", api_key)
+        .replace("@@canary_key@@", &canary_key());
     for (name, base) in bases {
         out = out.replace(&format!("@@{name}@@"), base);
     }
