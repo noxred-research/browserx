@@ -452,7 +452,7 @@ The server **refuses to start** when the grant is unsigned, malformed, or wider 
 
 **What a grant does.**
 
-- **Read and write origins.** Content from an origin outside `ro_origins` and `rw_origins` is never returned: navigation there is refused (`origin_not_in_rw`) and a frame from such an origin appears in a snapshot only as a placeholder, `(content withheld: outside the read scope)`. Read-only origins can be read but are not places to act. Every top-level request, redirect hops included, is checked against the same rule.
+- **Read and write origins.** Content from an origin outside `ro_origins` and `rw_origins` is never returned: navigation there is refused (`origin_not_in_rw`) and a frame from such an origin appears in a snapshot only as a placeholder, `(content withheld: outside the read scope)`. A `screenshot` of a page that embeds a frame from such an origin is refused with `frame_not_in_ro`, because pixels cannot be filtered by origin. Read-only origins can be read but are not places to act. Every top-level request, redirect hops included, is checked against the same rule.
 - **URLs built by the model.** The URL argument of `open_page` must be a read-write origin, or an origin the grant lets the session read **and** whose URL was literally seen as a link or form action on a readable page. A URL that carries a secret-looking value (a known credential prefix, a JWT, a long hex string or a long high-entropy token in a query value, a path segment or a fragment) is refused with `origin_not_in_rw` unless it goes to a read-write origin; to a read-write origin it needs an [approval](#approvals) (`exfiltration_guard`) unless the same URL was seen on a page. Independently of any grant, a URL that contains a value the redactor recognizes as a secret is refused with `secret_in_url`.
 - **Tools, actions and principal.** `tool_not_granted`, `action_not_granted` and `principal_not_granted` refuse what the grant does not list.
 - **Budgets.** `budget_exhausted` refuses a call beyond `calls` or `time_secs` of a handle.
@@ -496,7 +496,7 @@ A refusal carries its code in `error.detail.reason` and in the audit entry's `re
 | `blocked_protected` | The request matches a `[[protected]]` pattern of the manifest |
 | `unsigned_manifest`, `window_closed` | The manifest is unsigned or invalid; the engagement, manifest, grant or a recurring window is closed |
 | `visit_only`, `impact_ceiling`, `profile_denied` | A change on a `visit` host; the manifest's impact is `observe`; the profile denies the class |
-| `origin_not_in_rw`, `exfiltration_guard`, `secret_in_url` | The grant's origin and URL rules, and the secret checks |
+| `origin_not_in_rw`, `frame_not_in_ro`, `exfiltration_guard`, `secret_in_url` | The grant's origin and URL rules, and the secret checks |
 | `tool_not_granted`, `action_not_granted`, `principal_not_granted`, `outside_plan`, `budget_exhausted` | The grant's tool, class, principal, plan and budget limits (and the manifest's `max_calls`) |
 | `rule_of_two` | All three flags are set: refused in `strict`, an approval reason in `enforce` |
 | `approval_declined`, `approval_invalid` | The human said no; the approval evidence was altered, issued to another caller or for another request |

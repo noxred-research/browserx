@@ -176,6 +176,27 @@ impl Conn {
             .unwrap_or_default()
     }
 
+    /// The origins of every frame of the page, the page's own included (from the frame tree).
+    pub(crate) async fn frame_origins(&self, tab: &TabRef) -> ToolResult<Vec<String>> {
+        let tree = self.call(tab, "Page.getFrameTree", json!({})).await?;
+        let mut origins = Vec::new();
+        let mut stack = vec![&tree["frameTree"]];
+        while let Some(node) = stack.pop() {
+            if let Some(url) = node["frame"]["url"].as_str()
+                && let Ok(parsed) = url::Url::parse(url)
+                && matches!(parsed.scheme(), "http" | "https")
+            {
+                origins.push(parsed.origin().ascii_serialization());
+            }
+            for child in node["childFrames"].as_array().into_iter().flatten() {
+                stack.push(child);
+            }
+        }
+        origins.sort();
+        origins.dedup();
+        Ok(origins)
+    }
+
     /// Describes the element behind `backend` (a DOM backend node id) for the action classifier.
     pub(crate) async fn element_features(
         &self,

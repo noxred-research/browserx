@@ -370,6 +370,20 @@ pub(super) async fn page_text(ctx: &Arc<Ctx>, call: &Call<'_>, args: &Args) -> T
 pub(super) async fn screenshot(ctx: &Arc<Ctx>, call: &Call<'_>, args: &Args) -> ToolResult {
     let (handle, id, tab) = open(ctx, call, args).await?;
     read_gate(ctx, call, "screenshot", &handle, &tab)?;
+    if ctx.scope.grant().is_some() {
+        // Pixels cannot be filtered by origin: a frame the grant does not let the session read
+        // would be in the image.
+        for origin in handle.frame_origins(&tab).await? {
+            if !ctx.scope.read_allowed(&origin) {
+                return Err(ToolError::refused_with(
+                    "frame_not_in_ro",
+                    format!(
+                        "the page embeds content from {origin}, which the scope grant does not let this session read: a screenshot would show it"
+                    ),
+                ));
+            }
+        }
+    }
     let shot = handle
         .screenshot(&tab, args.bool("full_page").unwrap_or(false))
         .await?;

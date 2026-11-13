@@ -705,6 +705,7 @@ async fn a_signed_grant_limits_reading_actions_and_the_steps_that_may_run() {
          not_after = \"2099-01-01T00:00:00Z\"\n[budgets]\ncalls = 100\n\
          [[plan]]\ntool = \"open_page\"\norigin = \"{app}\"\naction_class = \"navigate_in_scope\"\nmax_count = 3\n\
          [[plan]]\ntool = \"page_snapshot\"\nmax_count = 5\n\
+         [[plan]]\ntool = \"screenshot\"\nmax_count = 2\n\
          [[plan]]\ntool = \"click\"\nmax_count = 2\n",
         doc = doc.base,
         app = app.base
@@ -757,6 +758,12 @@ async fn a_signed_grant_limits_reading_actions_and_the_steps_that_may_run() {
     // Text of an iframe from an origin the grant does not cover never reaches the model.
     assert!(!snapshot.contains("IFRAME-SECRET-TEXT"), "{snapshot}");
     assert!(snapshot.contains("content withheld"), "{snapshot}");
+    // A screenshot would show the frame, so it is refused while the frame is on the page.
+    let shot = lab
+        .mcp
+        .tool("screenshot", json!({"session_id": lab.id}))
+        .await;
+    assert_eq!(reason(&shot).as_deref(), Some("frame_not_in_ro"), "{shot}");
     assert!(framed.count("/frame") <= 1);
 
     // The injected link to a non-grant origin: refused before any request leaves.
