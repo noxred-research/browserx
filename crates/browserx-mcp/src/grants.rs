@@ -59,7 +59,9 @@ fn invalid(message: impl Into<String>) -> GrantError {
 struct BudgetsRaw {
     calls: Option<u64>,
     time_secs: Option<u64>,
-    cost_usd: Option<f64>,
+    /// Not supported yet: refused when present.
+    #[serde(skip_serializing)]
+    cost_usd: Option<toml::Value>,
 }
 
 /// One step of a plan.
@@ -121,8 +123,6 @@ pub struct Budgets {
     pub calls: Option<u64>,
     /// Seconds from the first call of a handle.
     pub time_secs: Option<u64>,
-    /// Model spend in US dollars (recorded; enforced where a model is used).
-    pub cost_usd: Option<f64>,
 }
 
 /// A parsed, validated grant.
@@ -174,6 +174,11 @@ impl Grant {
     }
 
     fn from_raw(raw: RawGrant) -> Result<Self, GrantError> {
+        if raw.budgets.cost_usd.is_some() {
+            return Err(invalid(
+                "budgets.cost_usd is not supported yet: remove it (no tool spends model budget under a grant)",
+            ));
+        }
         let meta = raw.grant.clone();
         if meta.engagement.trim().is_empty() {
             return Err(invalid("grant.engagement must not be empty"));
@@ -226,7 +231,6 @@ impl Grant {
         let budgets = Budgets {
             calls: raw.budgets.calls,
             time_secs: raw.budgets.time_secs,
-            cost_usd: raw.budgets.cost_usd,
         };
         if budgets.calls == Some(0) || budgets.time_secs == Some(0) {
             return Err(invalid("budgets must be positive"));
@@ -942,6 +946,17 @@ max_calls = 100
         ]);
         assert!(active.was_observed(&url::Url::parse("https://app.example.test/a").unwrap()));
         assert!(!active.was_observed(&url::Url::parse("https://app.example.test/b").unwrap()));
+    }
+
+    #[test]
+    fn a_cost_budget_is_refused_not_ignored() {
+        let error = Grant::parse(&SAMPLE.replace("calls = 50", "calls = 50\ncost_usd = 2.0"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("cost_usd") && error.contains("not supported yet"),
+            "{error}"
+        );
     }
 
     #[test]

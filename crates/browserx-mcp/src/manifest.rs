@@ -133,8 +133,16 @@ pub struct Limits {
     pub rps: Option<u32>,
     /// Tool calls that touch pages, in total.
     pub max_calls: Option<u64>,
-    /// Model spend ceiling in US dollars (recorded; enforced where a model is used).
-    pub max_cost_usd: Option<f64>,
+}
+
+/// `[limits]` as read from the file: also catches the keys this phase does not enforce, so a
+/// manifest that asks for them is refused instead of silently ignored.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct LimitsRaw {
+    rps: Option<u32>,
+    max_calls: Option<u64>,
+    max_cost_usd: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -142,16 +150,6 @@ pub struct Limits {
 struct WindowsSection {
     #[serde(default)]
     allow: Vec<String>,
-}
-
-/// `[stop]`: breaker settings (read and reported; reserved for the loop breakers).
-#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Stop {
-    /// Pause when the target keeps failing.
-    pub on_target_unhealthy: Option<bool>,
-    /// Refusals before a handle is suspended.
-    pub blocked_proposals_before_suspend: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,11 +163,11 @@ struct Raw {
     #[serde(default)]
     impact: ImpactSection,
     #[serde(default)]
-    limits: Limits,
+    limits: LimitsRaw,
     #[serde(default)]
     windows: WindowsSection,
-    #[serde(default)]
-    stop: Stop,
+    /// Not supported yet: refused when present.
+    stop: Option<toml::Value>,
 }
 
 /// A host pattern: `host`, `host:port` or `*.suffix`.
@@ -406,8 +404,6 @@ pub struct Manifest {
     pub impact: Impact,
     /// Limits.
     pub limits: Limits,
-    /// Breaker settings.
-    pub stop: Stop,
     scope: Vec<(HostPattern, HostMode)>,
     protected: Vec<ProtectedRule>,
     windows: Vec<WindowRule>,
@@ -428,6 +424,20 @@ impl Manifest {
     /// When the TOML is malformed or a value is out of range.
     pub fn parse(text: &str) -> Result<Self, ManifestError> {
         let raw: Raw = toml::from_str(text).map_err(|e| ManifestError::Parse(e.to_string()))?;
+        if raw.limits.max_cost_usd.is_some() {
+            return Err(invalid(
+                "limits.max_cost_usd is not supported yet: remove it (no tool spends model budget under this manifest)",
+            ));
+        }
+        if raw.stop.is_some() {
+            return Err(invalid(
+                "[stop] is not supported yet: remove it (loop breakers are not implemented)",
+            ));
+        }
+        let limits = Limits {
+            rps: raw.limits.rps,
+            max_calls: raw.limits.max_calls,
+        };
         let meta = raw.engagement;
         for (name, value) in [
             ("id", &meta.id),
@@ -468,7 +478,7 @@ impl Manifest {
             .iter()
             .map(|w| WindowRule::parse(w))
             .collect::<Result<Vec<_>, _>>()?;
-        if raw.limits.rps == Some(0) || raw.limits.max_calls == Some(0) {
+        if limits.rps == Some(0) || limits.max_calls == Some(0) {
             return Err(invalid("limits.rps and limits.max_calls must be positive"));
         }
         if scope.len() > 256 || protected.len() > 256 {
@@ -481,8 +491,7 @@ impl Manifest {
             not_before,
             not_after,
             impact: raw.impact.level.unwrap_or(Impact::Observe),
-            limits: raw.limits,
-            stop: raw.stop,
+            limits,
             scope,
             protected,
             windows,
@@ -744,9 +753,6 @@ max_calls = 400
 [windows]
 allow = ["Mon-Fri 09:00-17:00 UTC"]
 
-[stop]
-on_target_unhealthy = true
-blocked_proposals_before_suspend = 5
 "#;
 
     fn keys() -> OperatorKeys {
@@ -872,11 +878,27 @@ blocked_proposals_before_suspend = 5
             SAMPLE.replace("Mon-Fri 09:00-17:00 UTC", "Mon-Fri 09:00-17:00 CET"),
             SAMPLE.replace("rps = 20", "rps = 0"),
             SAMPLE.replace("2026-12-31T00:00:00Z", "2025-12-31T00:00:00Z"),
-            SAMPLE.replace("[stop]", "[unknown]"),
+            SAMPLE.replace("[impact]", "[unknown]"),
             SAMPLE.replace("id = \"eng-2026-11-a\"", "id = \" \""),
         ] {
             assert!(Manifest::parse(&bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn settings_this_phase_does_not_enforce_are_refused_not_ignored() {
+        let cost = SAMPLE.replace("max_calls = 400", "max_calls = 400\nmax_cost_usd = 5");
+        let error = Manifest::parse(&cost).unwrap_err().to_string();
+        assert!(
+            error.contains("max_cost_usd") && error.contains("not supported yet"),
+            "{error}"
+        );
+        let stop = format!("{SAMPLE}\n[stop]\non_target_unhealthy = true\n");
+        let error = Manifest::parse(&stop).unwrap_err().to_string();
+        assert!(
+            error.contains("[stop]") && error.contains("not supported yet"),
+            "{error}"
+        );
     }
 
     #[test]

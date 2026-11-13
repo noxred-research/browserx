@@ -377,14 +377,9 @@ level = "probe"                            # observe (default) | probe | demonst
 [limits]
 rps = 5                                    # page-touching calls per second
 max_calls = 2000                           # page-touching calls in total
-max_cost_usd = 5.0                         # recorded only
 
 [windows]
 allow = ["Mon-Fri 09:00-17:00 UTC"]        # recurring windows, UTC only
-
-[stop]                                     # reserved: read and reported, not acted on yet
-on_target_unhealthy = true
-blocked_proposals_before_suspend = 3
 ```
 
 `id`, `operator` and `authorization_note` are required and non-empty; unknown keys are rejected. Host patterns are case-insensitive; `*.example.test` matches subdomains but not `example.test` itself; without a port a pattern matches any port. When several entries match a host, `blocked` wins over `visit` and `visit` over `attack`; a host that no entry names is out of scope. A protected pattern is `METHOD glob` (`*` as the method means any); the glob is matched against the full URL and, when it starts with `/`, against the path and query. At most 256 `[[scope]]` and 256 `[[protected]]` entries. A manifest without `[impact]` is `observe`.
@@ -403,7 +398,7 @@ blocked_proposals_before_suspend = 3
 | Unsigned, or the signature does not verify | The manifest is inert: it widens nothing and its hosts are not used as scope. The tools that change pages (`click`, `type_text`, `press_key`, `select_option`, `scroll`, `hover`, `evaluate_js`) are **unlisted** and refused with `unsigned_manifest` |
 | Before `not_before`, after `not_after` or outside `windows` | The same tools are unlisted and refused with `window_closed`, and so is every other tool that touches a page |
 
-The manifest's id, operator and authorization note replace the `[engagement]` values in the audit log when it is signed, and the manifest's SHA-256 (`manifest_digest`) and state (`engagement_status`: `active`, `not_started`, `expired`, `outside_windows`, `unsigned` or `invalid_signature`) are part of every audit entry. `max_cost_usd` and the `[stop]` settings are parsed and reported but not enforced by any tool today.
+The manifest's id, operator and authorization note replace the `[engagement]` values in the audit log when it is signed, and the manifest's SHA-256 (`manifest_digest`) and state (`engagement_status`: `active`, `not_started`, `expired`, `outside_windows`, `unsigned` or `invalid_signature`) are part of every audit entry. `limits.max_cost_usd`, `[stop]` and `budgets.cost_usd` in a grant are not supported yet: a manifest or grant that contains them is refused (at `manifest sign`, `grant sign` and at startup) with a "not supported yet" error instead of being ignored.
 
 ### Scope grants
 
@@ -439,7 +434,6 @@ not_after = "2026-02-01T00:00:00Z"
 [budgets]
 calls = 200                                # page-touching calls per handle
 time_secs = 3600                           # seconds from the handle's first call
-cost_usd = 2.0                             # recorded only
 
 [[plan]]                                   # optional ordered steps
 tool = "open_page"
