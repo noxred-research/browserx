@@ -111,6 +111,20 @@ async fn main() -> Result<()> {
             init_logging(cli.log_format);
             doctor::run(config.as_deref()).await
         }
+        Command::Mcp(args) => {
+            init_logging(cli.log_format);
+            let result = browserx_mcp::run(args, browserx_server::shutdown_signal()).await;
+            // The stdio transport reads stdin on a blocking thread that only returns when the
+            // client writes or closes the pipe. Returning from `main` would wait for it, so a
+            // stopped server would hang behind a client that keeps the pipe open: exit here.
+            match result {
+                Ok(()) => std::process::exit(0),
+                Err(error) => {
+                    eprintln!("Error: mcp server stopped with an error: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::Session { remote, command } => client::run(&remote, command).await,
     }
 }

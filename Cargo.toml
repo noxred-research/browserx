@@ -15,6 +15,8 @@ members = [
     "crates/browserx-pool",
     # HTTP API, authenticated CDP relay, metrics
     "crates/browserx-server",
+    # Model Context Protocol server: monitoring, session control and scoped browsing for AI agents
+    "crates/browserx-mcp",
     # The `browserx` binary
     "crates/browserx",
 ]
@@ -48,6 +50,7 @@ browserx-egress = { path = "crates/browserx-egress" }
 browserx-store = { path = "crates/browserx-store" }
 browserx-pool = { path = "crates/browserx-pool" }
 browserx-server = { path = "crates/browserx-server" }
+browserx-mcp = { path = "crates/browserx-mcp" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt", "time"] }

@@ -1,6 +1,6 @@
 # Isolation and security
 
-This page states what BrowserX separates, what it does not, which secrets it handles and how, and the threat model the design assumes. Read it before exposing a worker to anyone other than yourself.
+This page states what BrowserX separates, what it does not, which secrets it handles and how, and the threat model the design assumes. Read it before exposing a worker to anyone other than yourself. AI agents that drive a worker through the MCP server have their own safety model, described in [AI/LLM-native](ai-llm-native.md).
 
 ## Isolation modes
 

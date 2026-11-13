@@ -1,6 +1,6 @@
 # BrowserX documentation
 
-BrowserX is open-source browser pooling, session management, persistence, recovery and handoff. These pages describe `0.1.0-dev`. They are written for operators who run a worker and for developers who integrate a client; none of them depends on another repository.
+BrowserX is next-generation AI/LLM-native browser pooling, session management, persistence, recovery and handoff for authorized security research. AI agents can watch, drive and explain a worker within limits an operator sets; models advise and never authorize, and leases, recovery and egress policy stay deterministic code. These pages describe `0.1.0-dev`. They are written for operators who run a worker and for developers who integrate a client; none of them depends on another repository.
 
 ## Design
 
@@ -15,6 +15,7 @@ How BrowserX works and why. Read these to understand the guarantees before you r
 | [Handoff](design/handoff.md) | Moving control of a live session to another client without losing the browser |
 | [Isolation and security](design/isolation-and-security.md) | Dedicated and shared isolation, the scoped relay, credentials, threat model and limits |
 | [Egress](design/egress.md) | The loopback forwarder, destination policy, upstream proxies, sticky exits |
+| [AI/LLM-native](design/ai-llm-native.md) | What agents can do, the safety model, and why the data path stays deterministic |
 
 ## Guides
 
@@ -26,6 +27,7 @@ How to do things.
 | [Configuration reference](guides/configuration.md) | Every key of the TOML file, with defaults and bounds |
 | [API reference](guides/api.md) | HTTP routes, bodies, errors, the CDP relay |
 | [CLI reference](guides/cli.md) | Every `browserx` command and flag |
+| [MCP server](guides/mcp.md) | `browserx mcp`: stdio and HTTP setup, configuration, the tool catalog, resources, prompts, the audit log, typical sessions |
 | [Integrating CDP clients](guides/cdp-clients.md) | Attaching a client, reconnecting, handing off, reading the outcome |
 | [Using an upstream proxy](guides/upstream-proxy.md) | `proxy` in the session spec, username templates, sticky exits, CONNECT-only gateways |
 | [Custom launch profiles and browser builds](guides/launch-profiles.md) | Choosing an executable, flags and environment per profile |

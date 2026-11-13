@@ -272,6 +272,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "browserx-core",
+ "browserx-mcp",
  "browserx-runtime",
  "browserx-server",
  "browserx-store",
@@ -334,6 +335,37 @@ dependencies = [
  "url",
  "webpki-roots",
  "zeroize",
+]
+
+[[package]]
+name = "browserx-mcp"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "browserx-cdp",
+ "browserx-core",
+ "browserx-egress",
+ "browserx-pool",
+ "browserx-runtime",
+ "browserx-server",
+ "browserx-store",
+ "clap",
+ "hex",
+ "nix",
+ "rand 0.10.3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "url",
 ]
 
 [[package]]
