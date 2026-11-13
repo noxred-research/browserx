@@ -71,7 +71,7 @@ hex = "0.4"
 base64 = "0.22"
 aes-gcm = "0.11"
 zeroize = "1"
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 url = "2"
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
