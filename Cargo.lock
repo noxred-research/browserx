@@ -322,7 +322,7 @@ dependencies = [
 name = "browserx-egress"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "browserx-core",
  "rcgen",
  "rustls",
@@ -342,7 +342,7 @@ name = "browserx-mcp"
 version = "0.1.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "browserx-cdp",
  "browserx-core",
  "browserx-egress",
@@ -373,7 +373,7 @@ name = "browserx-pool"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "browserx-core",
  "browserx-egress",
  "browserx-runtime",
@@ -412,7 +412,7 @@ name = "browserx-server"
 version = "0.1.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "browserx-core",
  "browserx-egress",
  "browserx-pool",
@@ -443,7 +443,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "browserx-core",
  "hex",
  "nix",
