@@ -8,12 +8,14 @@ Security vulnerabilities are **not** reported through issues or pull requests; f
 
 ## Intended use and what we accept
 
-BrowserX is built for operating browsers and network egress that you own or are permitted to operate. Contributions must fit that purpose. We will decline changes that:
+BrowserX is AI/LLM-native browser infrastructure for authorized security research: it operates browsers and network egress that you own or are permitted to operate, and AI agents may watch, drive and explain it within limits an operator sets. Contributions must fit that purpose. We will decline changes that:
 
 - add capabilities aimed at evading a site's protections, hiding abuse, or attacking third parties;
 - weaken, bypass or add exceptions to authentication, lease-token handling, snapshot encryption, the scoped relay of shared browsers or the egress destination policy;
 - ship real credentials, cookies, harvested data, captured third-party content or exploit payloads in code, fixtures or tests;
-- make claims about how a website will treat a browser that BrowserX runs.
+- make claims about how a website will treat a browser that BrowserX runs;
+- let a model authorize anything: scope, capabilities, leases, recovery and egress decisions stay deterministic code, and no model may sit in the data path;
+- remove or weaken the scope checks, untrusted-content marking, secret redaction or audit log of the MCP server.
 
 Test only against local services and systems you own. See [Responsible use](README.md#responsible-use-and-security).
 

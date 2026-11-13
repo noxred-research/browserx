@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 browserx-core.workspace = true
+browserx-mcp.workspace = true
 browserx-runtime.workspace = true
 browserx-server.workspace = true
 browserx-store.workspace = true

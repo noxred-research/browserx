@@ -56,6 +56,10 @@ pub enum Command {
         #[arg(long, short)]
         config: Option<PathBuf>,
     },
+    /// Serve the Model Context Protocol (stdio or streamable HTTP) so AI agents can monitor, drive
+    /// and explain BrowserX within limits you set. Also: `mcp check`, `mcp audit verify`,
+    /// `mcp token new`.
+    Mcp(browserx_mcp::McpArgs),
     /// Talk to a running server.
     Session {
         #[command(flatten)]

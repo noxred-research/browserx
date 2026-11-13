@@ -2,7 +2,7 @@
 
 We take the security of BrowserX and of the people who run it seriously. This page says which versions are supported, how to report a vulnerability, what you can expect from us, and what is in and out of scope.
 
-> **Intended use.** BrowserX is infrastructure for operating browsers and network egress that you own or are permitted to operate. Use it only on systems and services you own or are authorized to automate. See [Responsible use](#responsible-use).
+> **Intended use.** BrowserX is AI/LLM-native browser infrastructure for authorized security research. It operates browsers and network egress that you own or are permitted to operate, and AI agents may drive it through the MCP server. Use it only on systems and services you own or are authorized to test or automate. See [Responsible use](#responsible-use).
 
 ## Supported versions
 
@@ -22,7 +22,7 @@ The [security workflow](.github/workflows/security.yml) checks locked dependenci
 **Do not open a public issue, pull request or discussion for a suspected vulnerability.** Report it privately through GitHub private vulnerability reporting for `noxred-research/browserx`:
 
 1. Open <https://github.com/noxred-research/browserx/security/advisories/new>, or go to the repository's **Security** tab and choose **Report a vulnerability**.
-2. Describe the affected component (HTTP API, CDP relay, scheduler, egress forwarder, snapshot storage, runtime, CLI) and the version or commit, the impact, and steps or a proof of concept that reproduce the problem. A minimal reproduction against a local worker is ideal.
+2. Describe the affected component (HTTP API, CDP relay, MCP server, scheduler, egress forwarder, snapshot storage, runtime, CLI) and the version or commit, the impact, and steps or a proof of concept that reproduce the problem. A minimal reproduction against a local worker is ideal.
 3. Do not include live credentials, real personal data, working lease tokens, snapshot key files or captured third-party content in the report.
 
 If the private reporting option is not offered on the repository, open a public issue that asks for a private channel and contains no technical details.
@@ -65,6 +65,14 @@ This safe harbor covers the BrowserX project only. It does not authorize testing
 - **Egress controls.** A way to make the forwarder dial a private, loopback, link-local, carrier-grade NAT, cloud metadata or other address its policy refuses, including through DNS rebinding, redirects, alternative IP spellings or IPv6 embeddings; or a way to reach the network from a browser without going through the forwarder.
 - **Secret handling.** Leakage of API keys, lease tokens, proxy passwords or snapshot key material into logs, metrics, error bodies, API responses, command lines or environment of the browser beyond what the documentation states.
 - **Snapshot and profile storage.** Reading or forging snapshots without the key, swapping sealed snapshots between profiles or versions, files created with wider permissions than documented, profile directories shared between two browsers, or erasure that leaves data behind.
+- **MCP server and AI tools** (`browserx mcp`, crate `browserx-mcp`).
+  - Listing or calling a tool whose capability the operator did not enable; a `confirm: true` requirement that can be skipped; a browsing or interaction tool that works on a session the MCP server did not create or adopt.
+  - Navigation or interaction outside `browse.allowed_origins` or the engagement window, including through redirects, alternative URL spellings, non-`http(s)` schemes, new tabs or `about:` pages; stale element references that act on a different element.
+  - Access to the streamable HTTP listener without the bearer token, a non-constant-time token comparison, a missing or bypassable `Origin` check, or binding beyond loopback without an explicit operator choice.
+  - Disclosure of lease tokens, `cdp_url`, API keys, the `[ai]` key or proxy credentials to the model, in tool results, resources, logs or the audit log; page-derived text returned without the `<untrusted_page_content>` wrapper.
+  - A gap in the audit log: a `tools/call` that is not recorded, a chain that `browserx mcp audit verify` accepts after modification, or an audit file created with wider permissions than `0600`.
+  - Unbounded messages, output, concurrency, tabs or network-log memory, and bypass of per-tool rate limits.
+  - Any path that lets model output change a lease, a recovery decision, an egress decision or the relay policy: those are deterministic and must not depend on a model.
 - **Resource limits.** Bypassing owner quotas, the admission queue bounds, message-size limits or forwarder limits so that one client exhausts the worker.
 - **Supply chain.** Weaknesses in the build, container, workflow or dependency configuration.
 
@@ -76,6 +84,9 @@ This safe harbor covers the BrowserX project only. It does not authorize testing
 - malicious behavior of a client that holds a valid lease on a **dedicated** browser: it controls a real browser by design;
 - plaintext transport on listeners an operator exposes without TLS termination, which the documentation tells operators to avoid;
 - denial of service by volume against a deployment that does not use the limits the documentation tells operators to configure;
+- what a model says or concludes: an advisory tool (`summarize_page`, `extract_data`, `diagnose`) that returns wrong, incomplete or manipulated text is a quality issue, not a vulnerability, unless it also bypasses a control listed above;
+- prompt injection that only changes the model's wording or choices inside the scope, capabilities and limits the operator configured;
+- the behavior and data handling of the third-party model endpoint an operator configures under `[ai]`;
 - the development defaults of the files in `docker/`;
 - reports from automated scanners without a demonstrated impact, and social engineering of maintainers;
 - abuse of BrowserX by third parties against systems you operate. We cannot act on deployments we do not run; report that activity to the operator or hosting provider concerned.
@@ -89,15 +100,17 @@ Knowing what a deployment holds helps you judge impact and protect it.
 - **Snapshots** hold session cookies and `localStorage`. They are encrypted with AES-256-GCM before they reach disk; the key lives in a separate key file (mode `0600`). Anyone who has both can read them.
 - **Profile directories** are ordinary Chromium profiles, unencrypted, readable by the worker's user. They contain cookies, storage and caches.
 - **Proxy passwords** of a session are held in the lease registry (needed to recover the session) and are write-only through the API.
+- **MCP server configuration** names the worker URL and files holding the worker API key and the optional `[ai]` key; keys are read from files and never inline. The optional HTTP listener stores only the SHA-256 digest of its bearer token.
+- **The MCP audit log** records every tool call with sensitive arguments redacted, the operator and the authorization note, in a hash-chained JSONL file with mode `0600`. It can still contain URLs and page text excerpts, so protect it like a log of your engagement.
 - **Browsers** execute whatever pages their clients open, with the privileges of the worker's user. Isolate workers accordingly.
 
 See [isolation and security](docs/design/isolation-and-security.md) for the threat model.
 
 ## Responsible use
 
-BrowserX gives automation clients real browsers and network egress. Use it only where you have the right to: your own sites and test environments, services whose owners and terms permit automation, and upstream proxies you are entitled to use. Do not use it to attack or overload third parties, to access systems or data you are not authorized to access, to evade a site's protections, or for anything unlawful where you operate. This is the project's intended-use policy and a condition of support and community participation; the [AGPL-3.0-only](LICENSE) license itself is unchanged.
+BrowserX gives automation clients, including AI agents, real browsers and network egress. Use it only where you have the right to: your own sites and test environments, services whose owners and terms permit automation, and upstream proxies you are entitled to use. Do not use it to attack or overload third parties, to access systems or data you are not authorized to access, to evade a site's protections, or for anything unlawful where you operate. This is the project's intended-use policy and a condition of support and community participation; the [AGPL-3.0-only](LICENSE) license itself is unchanged.
 
-The project enforces parts of this in code: the egress forwarder refuses non-public destinations by default, quotas and queues bound what one owner can consume, and the relay scopes shared sessions. These controls reduce harm; they do not verify that you are authorized. Misuse of BrowserX is not covered by this policy, is not covered by the safe harbor above, and is your responsibility.
+The project enforces parts of this in code: the egress forwarder refuses non-public destinations by default, quotas and queues bound what one owner can consume, the relay scopes shared sessions, and the MCP server refuses navigation outside the operator's scope and audits every tool call. These controls reduce harm; they do not verify that you are authorized. Misuse of BrowserX is not covered by this policy, is not covered by the safe harbor above, and is your responsibility.
 
 ## Disclosure
 

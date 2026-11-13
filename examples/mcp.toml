@@ -1,0 +1,103 @@
+# BrowserX MCP server configuration: `browserx mcp --config mcp.toml`
+#
+# Lets AI agents (any MCP client) watch, drive and explain BrowserX within limits you set.
+# Models advise and act through scoped tools; they never authorize. Everything not enabled here
+# is off: with no capabilities the server is read-only monitoring.
+#
+# Validate with `browserx mcp check mcp.toml`. Relative paths resolve against this file's
+# directory. Secrets are never written here: they live in files named below (mode 0600).
+
+[server]
+# The BrowserX API listener (`[server] listen` of the BrowserX configuration).
+url = "http://127.0.0.1:7690"
+# The operations listener (/healthz, /readyz, /metrics). Needed for pool_status, assess, diagnose.
+ops_url = "http://127.0.0.1:7691"
+# File holding an API key (`browserx keys new mcp`). Give this key its own max_sessions quota.
+api_key_file = "./mcp-api-key"
+request_timeout_secs = 30
+
+[mcp]
+# What the server may do. Each capability adds tools; a tool that is not enabled is not listed.
+#   sessions  create_session, renew_session, snapshot_session, release_session
+#   handoff   handoff_session (rotate the controller token; needs sessions)
+#   browse    open_page, page_snapshot, page_text, screenshot, tabs, wait_for, network_log, console_log
+#   interact  click, type_text, press_key, select_option, scroll, hover (needs browse)
+#   evaluate  evaluate_js (needs browse; powerful, leave off unless you need it)
+capabilities = ["sessions", "browse", "interact"]
+# Show lease tokens and CDP URLs to the model. Leave off: the server drives the browser itself.
+reveal_endpoints = false
+max_in_flight = 8                # requests served at once
+max_result_bytes = 262144        # largest tool result text
+release_on_exit = true           # release the sessions this server created when it stops
+
+[mcp.http]
+# Streamable HTTP (`browserx mcp --http`). Loopback by default; terminate TLS in front of it
+# for anything else. Generate the token with `browserx mcp token new`; only its digest is stored.
+listen = "127.0.0.1:7692"
+# token_sha256 = "<64 hex characters>"
+allowed_origins = []             # extra Origin values besides loopback ones
+path = "/mcp"
+max_body_bytes = 4194304
+
+[browse]
+# The origins the browser may visit: exact scheme://host[:port], no paths. Navigation outside
+# them is refused before the request is sent, and every redirect hop is checked too.
+allowed_origins = ["https://app.example.test"]
+# With require_scope = true (the default) browsing is refused unless allowed_origins, the
+# operator and the authorization note below are all set.
+require_scope = true
+max_tabs = 8
+default_max_chars = 12000        # budget of snapshots, page text and script results
+max_chars_cap = 60000
+command_timeout_secs = 20
+navigation_timeout_secs = 30
+network_log_entries = 500        # per tab
+console_log_entries = 200        # per tab
+
+[engagement]
+# Recorded in every audit entry.
+id = "ENG-2026-014"
+operator = "alice"
+authorization_note = "Written authorization, ticket SEC-1234, scope document v3"
+# Optional: browsing is refused outside this window (RFC 3339).
+# not_before = "2026-01-05T00:00:00Z"
+# not_after = "2026-03-31T23:59:59Z"
+
+[sessions]
+max_tracked = 4                  # sessions this server controls at once
+default_ttl_secs = 900
+max_ttl_secs = 3600
+
+[audit]
+# Hash-chained JSONL, created with mode 0600. Verify: `browserx mcp audit verify <path>`.
+path = "./mcp-audit.jsonl"
+
+[limits]
+sample_interval_secs = 15        # background metrics samples for rates
+# Calls per minute by tool (defaults: monitoring/browse/interact 120, sessions/ai 20, evaluate 30).
+[limits.per_minute]
+click = 60
+evaluate_js = 10
+
+# Optional: any chat-completions compatible endpoint for summarize_page, extract_data and
+# diagnose. Without it those tools are not listed and everything else works. The model sees
+# redacted page content and findings; it can only advise.
+[ai]
+base_url = "http://127.0.0.1:11434/v1"
+model = "local-model"
+# api_key_file = "./ai-api-key"
+timeout_secs = 60
+max_tokens = 1024
+max_input_chars = 24000
+
+# Named upstream proxy routes the model may choose by name in create_session. Credentials stay
+# here; the model never sees them. Needs isolation = dedicated_browser.
+[proxy_routes.eu_exit]
+url = "http://gateway.example.test:8080"
+username = "pool-session-{session}"
+# password_file = "./eu-exit-password"
+
+# Optional: an existing session this server may browse (the file holds its controller token).
+# [[adopt]]
+# session_id = "ses_0123456789abcdef0123456789abcdef"
+# token_file = "./adopted-session.token"

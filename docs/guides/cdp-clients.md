@@ -1,6 +1,6 @@
 # Integrating CDP clients
 
-Any client that can connect to a Chrome DevTools Protocol WebSocket can use a BrowserX session. This page describes the integration contract in client-neutral terms. Your client's documentation says how to connect it to a `ws://` browser endpoint; BrowserX supplies the endpoint and the lifecycle around it.
+Any client that can connect to a Chrome DevTools Protocol WebSocket can use a BrowserX session. This page describes the integration contract in client-neutral terms. Your client's documentation says how to connect it to a `ws://` browser endpoint; BrowserX supplies the endpoint and the lifecycle around it. AI agents that speak the Model Context Protocol do not need this page: they use the [MCP server](mcp.md), which holds the endpoint and the lease token on their behalf.
 
 ## The flow
 
