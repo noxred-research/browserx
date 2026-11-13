@@ -13,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use url::Url;
+use zeroize::Zeroizing;
 
 use crate::http::{HeadError, Host, parse_status, read_head};
 use crate::policy::{CompiledPolicy, Verdict};
@@ -41,6 +42,9 @@ pub(crate) enum DialError {
     Timeout,
 }
 
+/// What a client is told when the upstream proxy cannot be used, whatever the cause.
+const UPSTREAM_UNAVAILABLE: &str = "upstream proxy is unavailable";
+
 enum Kind {
     Direct,
     Http {
@@ -57,9 +61,9 @@ pub(crate) struct Route {
     proxy_host: String,
     proxy_port: u16,
     /// `Basic ...` header value for HTTP upstreams.
-    basic: Option<String>,
+    basic: Option<Zeroizing<String>>,
     /// Username/password for SOCKS5 sub-negotiation.
-    socks_auth: Option<(String, String)>,
+    socks_auth: Option<(Zeroizing<String>, Zeroizing<String>)>,
     max_head: usize,
 }
 
@@ -123,13 +127,21 @@ impl Route {
             }
         };
         let user = route.render_username(sticky_key, generation);
-        let password = route.password.as_ref().map(|p| p.expose().to_owned());
+        let password = route
+            .password
+            .as_ref()
+            .map(|p| Zeroizing::new(p.expose().to_owned()));
         if user.is_none() && password.is_some() {
             return Err(Error::InvalidRequest(
                 "proxy password given without a username".into(),
             ));
         }
-        let credentials = user.map(|u| (u, password.unwrap_or_default()));
+        let credentials = user.map(|u| {
+            (
+                Zeroizing::new(u),
+                password.unwrap_or_else(|| Zeroizing::new(String::new())),
+            )
+        });
         if matches!(kind, Kind::Socks5 { .. })
             && credentials
                 .as_ref()
@@ -142,7 +154,11 @@ impl Route {
         let basic = credentials
             .as_ref()
             .filter(|_| matches!(kind, Kind::Http { .. }))
-            .map(|(u, p)| format!("Basic {}", STANDARD.encode(format!("{u}:{p}"))));
+            .map(|(u, p)| {
+                let raw = Zeroizing::new(format!("{}:{}", u.as_str(), p.as_str()));
+                let encoded = Zeroizing::new(STANDARD.encode(raw.as_bytes()));
+                Zeroizing::new(format!("Basic {}", encoded.as_str()))
+            });
         let socks_auth = credentials.filter(|_| matches!(kind, Kind::Socks5 { .. }));
         Ok(Self {
             kind,
@@ -179,7 +195,7 @@ impl Route {
                 })
             }
             Kind::Http { tls } => {
-                let tcp = self.connect_proxy().await?;
+                let tcp = self.connect_proxy(policy).await?;
                 let mut io: BoxIo = match tls {
                     Some((connector, name)) => {
                         let stream = connector.connect(name.clone(), tcp).await.map_err(|e| {
@@ -205,7 +221,7 @@ impl Route {
                     })?;
                     SocksTarget::Ip(first.ip())
                 };
-                let mut io = self.connect_proxy().await?;
+                let mut io = self.connect_proxy(policy).await?;
                 self.socks_handshake(&mut io, &target, port).await?;
                 Ok(Tunnel {
                     io: Box::new(io),
@@ -215,15 +231,32 @@ impl Route {
         }
     }
 
-    async fn connect_proxy(&self) -> std::result::Result<TcpStream, DialError> {
-        let addrs: Vec<SocketAddr> =
-            tokio::net::lookup_host((self.proxy_host.as_str(), self.proxy_port))
-                .await
-                .map_err(|_| DialError::Unreachable("upstream proxy host did not resolve".into()))?
-                .collect();
+    /// Connects to the upstream proxy itself.
+    ///
+    /// The proxy address is tenant-supplied, so it gets the same treatment as a
+    /// destination: resolve it once, keep only addresses the policy permits and
+    /// dial exactly those (never a second lookup, which could answer
+    /// differently). Every failure here - resolution, policy, connection -
+    /// collapses into one message, so a tenant cannot use the proxy URL to
+    /// probe internal hosts and ports.
+    async fn connect_proxy(
+        &self,
+        policy: &CompiledPolicy,
+    ) -> std::result::Result<TcpStream, DialError> {
+        let host = match self.proxy_host.parse::<IpAddr>() {
+            Ok(ip) => Host::Ip(ip),
+            Err(_) => Host::Name(self.proxy_host.to_ascii_lowercase()),
+        };
+        let unavailable = |stage: &str, why: &DialError| {
+            tracing::debug!(stage, reason = ?why, "upstream proxy unavailable");
+            DialError::Unreachable(UPSTREAM_UNAVAILABLE.into())
+        };
+        let addrs = allowed_addrs(&host, self.proxy_port, policy)
+            .await
+            .map_err(|e| unavailable("resolve", &e))?;
         connect_any(&addrs)
             .await
-            .map_err(|_| DialError::Unreachable("upstream proxy is unreachable".into()))
+            .map_err(|e| unavailable("connect", &e))
     }
 
     async fn http_connect<S: AsyncRead + AsyncWrite + Unpin>(
@@ -233,10 +266,12 @@ impl Route {
         port: u16,
     ) -> std::result::Result<Vec<u8>, DialError> {
         let authority = host.authority(port);
-        let mut request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
+        let mut request = Zeroizing::new(format!(
+            "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n"
+        ));
         if let Some(basic) = &self.basic {
             request.push_str("Proxy-Authorization: ");
-            request.push_str(basic);
+            request.push_str(basic.as_str());
             request.push_str("\r\n");
         }
         request.push_str("\r\n");
@@ -288,13 +323,14 @@ impl Route {
                 let (user, pass) = self.socks_auth.as_ref().ok_or_else(|| {
                     DialError::Upstream("upstream SOCKS5 proxy demands credentials".into())
                 })?;
-                let mut msg = Vec::with_capacity(3 + user.len() + pass.len());
+                let mut msg = Zeroizing::new(Vec::with_capacity(3 + user.len() + pass.len()));
                 msg.push(1);
                 msg.push(u8::try_from(user.len()).unwrap_or(u8::MAX));
                 msg.extend_from_slice(user.as_bytes());
                 msg.push(u8::try_from(pass.len()).unwrap_or(u8::MAX));
                 msg.extend_from_slice(pass.as_bytes());
                 io.write_all(&msg).await.map_err(io_err)?;
+                drop(msg);
                 let mut reply = [0u8; 2];
                 io.read_exact(&mut reply).await.map_err(io_err)?;
                 if reply[1] != 0 {

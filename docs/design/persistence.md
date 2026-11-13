@@ -26,7 +26,9 @@ A snapshot is portable authentication state, not a process checkpoint.
 | `localStorage` of each origin that has an open `http` or `https` page at capture time (deduplicated by origin) | `sessionStorage`, IndexedDB, Cache Storage, service worker registrations and runtime |
 | The URLs of the top-level pages, which are reopened on restore | Origins that were never opened during the session, open sockets, WebSocket connections, in-flight requests |
 
-Capture is bounded: at most 20,000 cookies, 64 origins, 5 MiB of `localStorage` per origin and 64 page URLs.
+`localStorage` is read by the browser itself (the `DOMStorage` DevTools domain), for the origin the browser reports for each page. No script runs in the page, so a page cannot influence which origin its entries are filed under or what they contain. An origin whose storage exceeds the per-origin limit, or whose reply is too large for the worker's own DevTools connection, is skipped with a warning.
+
+Capture is bounded: at most 20,000 cookies, 64 origins, 5 MiB of `localStorage` per origin and 64 page URLs, and 48 MiB in total (the JSON size of cookies, storage and URLs), below the 64 MiB limit of a sealed snapshot. A session whose state is larger than the total budget fails the capture with an `invalid_request` error that names the budget; clear cookies or storage to make it snapshot-able.
 
 ### When snapshots are taken
 
@@ -48,9 +50,9 @@ Snapshots are sealed before they reach the store, so the store only ever sees ci
 
 - **Algorithm:** AES-256-GCM with a random 96-bit nonce per snapshot.
 - **Bound metadata:** the associated data is the canonical JSON of `(profile_id, version, session_id, generation)`. Moving a sealed blob under a different profile, version or session makes decryption fail, so metadata cannot be swapped.
-- **Key file:** `snapshot_key_file`, created with `browserx snapshot-key new <path>` (mode `0600`, refuses to overwrite). Format: a header line `browserx-snapshot-key v1`, then `key_id=<hex8>` and `key=<base64 of 32 bytes>`.
+- **Key file:** `snapshot_key_file`, created with `browserx snapshot-key new <path>` (mode `0600`, parent directories `0700` when created, refuses to overwrite; loading requires an owner-only file owned by the current user). Format: a header line `browserx-snapshot-key v1`, then `key_id=<hex8>` and `key=<base64 of 32 bytes>`.
 - **Rotation:** one key is active and seals new snapshots; earlier keys can be loaded as retired, open-only keys (`storage.retired_snapshot_key_files`). The `key_id` in each snapshot's metadata selects the key that opens it.
-- **Key hygiene:** keys are zeroized in memory on drop. Plaintext with a `format_version` newer than the worker understands is refused.
+- **Key hygiene:** keys are held in zeroizing buffers, borrowed rather than copied, and wiped on drop. Plaintext with a `format_version` newer than the worker understands is refused.
 
 Treat snapshots as credentials: a snapshot holds session cookies. Protect the key files separately from the snapshot directory, and back both up (see [operations](../guides/operations.md#key-rotation)).
 

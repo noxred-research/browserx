@@ -113,6 +113,10 @@ pub(crate) struct State {
     pub sessions: HashMap<SessionId, Live>,
     pub browsers: HashMap<BrowserId, BrowserSlot>,
     pub launching: usize,
+    /// Shared browsers being launched, by launch profile. They are candidates
+    /// for shared admissions: those wait for the launch instead of starting
+    /// another browser each.
+    pub launching_shared: HashMap<Option<String>, usize>,
     pub warming: usize,
     pub tearing_down: usize,
     pub queue: VecDeque<u64>,
@@ -158,8 +162,27 @@ pub(crate) enum Want {
 /// What an admission was granted.
 pub(crate) enum Grant {
     Dedicated,
-    SharedNew,
+    /// A new shared browser for this launch profile.
+    SharedNew(Option<String>),
     SharedExisting(Arc<BrowserEntry>),
+}
+
+/// What one grant attempt came to.
+enum Attempt {
+    Granted(Grant),
+    /// No slot, but a shared browser that could serve the request is starting.
+    LaunchInFlight,
+    /// No slot and nothing is starting that could help.
+    Full,
+}
+
+fn end_shared_launch(st: &mut State, profile: &Option<String>) {
+    if let Some(n) = st.launching_shared.get_mut(profile) {
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            st.launching_shared.remove(profile);
+        }
+    }
 }
 
 /// A granted slot. Dropping it without committing gives the slot back.
@@ -181,12 +204,15 @@ impl Reservation {
         launch_profile: Option<String>,
         contexts: usize,
     ) {
-        if self.grant.take().is_none() {
+        let Some(grant) = self.grant.take() else {
             return;
-        }
+        };
         {
             let mut st = self.inner.st();
             st.launching = st.launching.saturating_sub(1);
+            if let Grant::SharedNew(profile) = &grant {
+                end_shared_launch(&mut st, profile);
+            }
             st.browsers.insert(
                 entry.id,
                 BrowserSlot {
@@ -247,8 +273,13 @@ impl Inner {
         let evicted = {
             let mut st = self.st();
             match grant {
-                Grant::Dedicated | Grant::SharedNew => {
+                Grant::Dedicated => {
                     st.launching = st.launching.saturating_sub(1);
+                    Vec::new()
+                }
+                Grant::SharedNew(profile) => {
+                    st.launching = st.launching.saturating_sub(1);
+                    end_shared_launch(&mut st, &profile);
                     Vec::new()
                 }
                 Grant::SharedExisting(entry) => {
@@ -272,7 +303,7 @@ impl Inner {
     /// Tries to satisfy `want` now. Side effects on success: reserves the slot.
     /// May evict an idle shared browser to make room; the caller spawns the
     /// returned teardowns after releasing the lock.
-    fn try_grant(&self, st: &mut State, want: &Want) -> (Option<Grant>, Vec<Arc<BrowserEntry>>) {
+    fn try_grant(&self, st: &mut State, want: &Want) -> (Attempt, Vec<Arc<BrowserEntry>>) {
         if let Want::Shared(profile) = want {
             let candidate = st
                 .browsers
@@ -289,16 +320,26 @@ impl Inner {
                 if let Some(slot) = st.browsers.get_mut(&entry.id) {
                     slot.contexts += 1;
                 }
-                return (Some(Grant::SharedExisting(entry)), Vec::new());
+                return (Attempt::Granted(Grant::SharedExisting(entry)), Vec::new());
+            }
+            // A browser that is still starting counts as a candidate: wait for
+            // it rather than launching one more per concurrent request.
+            if self.cfg.max_contexts_per_browser > 1
+                && st.launching_shared.get(profile).is_some_and(|n| *n > 0)
+            {
+                return (Attempt::LaunchInFlight, Vec::new());
             }
         }
         if st.slots_used() < self.cfg.max_browsers {
             st.launching += 1;
             let grant = match want {
                 Want::Dedicated => Grant::Dedicated,
-                Want::Shared(_) => Grant::SharedNew,
+                Want::Shared(profile) => {
+                    *st.launching_shared.entry(profile.clone()).or_insert(0) += 1;
+                    Grant::SharedNew(profile.clone())
+                }
             };
-            return (Some(grant), Vec::new());
+            return (Attempt::Granted(grant), Vec::new());
         }
         // Full: an idle shared browser is the cheapest thing to give up.
         let victim = st
@@ -314,7 +355,7 @@ impl Inner {
             st.tearing_down += 1;
             evicted.push(slot.entry);
         }
-        (None, evicted)
+        (Attempt::Full, evicted)
     }
 
     /// Removes idle shared browsers that are exhausted or exceed the warm count.
@@ -424,9 +465,15 @@ impl Inner {
         let (immediate, evicted, ticket) = {
             let mut st = self.st();
             if st.queue.is_empty() {
-                let (grant, evicted) = self.try_grant(&mut st, &want);
-                if grant.is_some() {
-                    (grant, evicted, None)
+                let (attempt, evicted) = self.try_grant(&mut st, &want);
+                if let Attempt::Granted(grant) = attempt {
+                    (Some(grant), evicted, None)
+                } else if matches!(attempt, Attempt::LaunchInFlight) {
+                    // Waits for a launch, not for capacity: the queue cap does not apply.
+                    let id = st.next_ticket;
+                    st.next_ticket += 1;
+                    st.queue.push_back(id);
+                    (None, evicted, Some(id))
                 } else if enforce_cap && self.cfg.queue_capacity == 0 {
                     drop(st);
                     self.spawn_teardowns(evicted);
@@ -471,10 +518,14 @@ impl Inner {
             let attempt = {
                 let mut st = self.st();
                 if st.queue.front() == Some(&ticket.id) {
-                    let (grant, evicted) = self.try_grant(&mut st, &want);
-                    if grant.is_some() {
-                        st.queue.pop_front();
-                    }
+                    let (attempt, evicted) = self.try_grant(&mut st, &want);
+                    let grant = match attempt {
+                        Attempt::Granted(grant) => {
+                            st.queue.pop_front();
+                            Some(grant)
+                        }
+                        Attempt::LaunchInFlight | Attempt::Full => None,
+                    };
                     Some((grant, evicted))
                 } else {
                     None
@@ -526,9 +577,10 @@ impl Inner {
         }
         st.launching += 1;
         st.warming += 1;
+        *st.launching_shared.entry(None).or_insert(0) += 1;
         Some(Reservation {
             inner: self.clone(),
-            grant: Some(Grant::SharedNew),
+            grant: Some(Grant::SharedNew(None)),
         })
     }
 

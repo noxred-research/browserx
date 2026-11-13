@@ -5,10 +5,13 @@
 //! * [`ops_router`]: `/healthz`, `/readyz` and Prometheus `/metrics`.
 //! * [`Config`]: the TOML configuration; [`run`] wires everything and serves.
 //!
-//! The relay carries two behaviors. Dedicated sessions get a transparent byte
-//! relay to the browser-level DevTools endpoint. Shared-browser sessions get a
-//! scoped relay (see [`scope`]) that confines a cooperative client to its own
-//! browser context; it is not a boundary against a hostile tenant.
+//! Every relay connection passes the host-protection policy (see [`host_policy`]):
+//! no `file:` or internal-page navigation, no per-context proxy overrides, no
+//! host file selection, downloads confined to a per-session directory. Dedicated
+//! sessions otherwise get a transparent relay to the browser-level DevTools
+//! endpoint. Shared-browser sessions get a scoped relay (see [`scope`]) that
+//! confines a cooperative client to its own browser context; it is not a
+//! boundary against a hostile tenant.
 //!
 //! Transport is plaintext WebSocket/HTTP. Terminate TLS in front of the server
 //! for any use beyond a trusted network or loopback.
@@ -18,6 +21,9 @@ mod auth;
 mod config;
 mod dto;
 mod error;
+pub mod host_policy;
+mod limits;
+mod listener;
 mod ops;
 mod relay;
 mod run;
@@ -31,6 +37,7 @@ pub use config::{
 };
 pub use dto::{LeaseView, SnapshotView};
 pub use error::{ApiError, status_of};
+pub use limits::ServerLimits;
 pub use ops::{ops_router, render_metrics};
 pub use relay::MAX_MESSAGE_BYTES;
 pub use run::{build, run, serve, shutdown_signal};

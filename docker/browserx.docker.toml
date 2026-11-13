@@ -16,7 +16,8 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 
 [storage]
 state_dir = "/var/lib/browserx/state"
-snapshot_key_file = "/var/lib/browserx/state/snapshot.key"
+# Outside state_dir: browsers run as the worker's uid.
+snapshot_key_file = "/var/lib/browserx/keys/snapshot.key"
 
 [runtime.launch_profiles.default]
 headless = true

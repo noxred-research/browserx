@@ -4,7 +4,7 @@
 mod common;
 
 use browserx_core::{Error, Generation, ProfileId, SessionId};
-use browserx_store::Sealer;
+use browserx_store::{Sealer, Zeroizing};
 use common::{sample_state, sealed_snapshot, test_sealer};
 
 #[test]
@@ -31,10 +31,10 @@ fn wrong_key_tampering_and_truncation_fail() {
     let sealer = test_sealer();
     let snap = sealed_snapshot(&sealer, ProfileId::new(), 1);
 
-    let other = Sealer::new("0badc0de".into(), [1u8; 32]);
+    let other = Sealer::new("0badc0de".into(), &Zeroizing::new([1u8; 32]));
     assert!(matches!(other.open(&snap), Err(Error::Crypto(_))));
 
-    let renamed = Sealer::new("feedface".into(), [42u8; 32]);
+    let renamed = Sealer::new("feedface".into(), &Zeroizing::new([42u8; 32]));
     assert!(matches!(renamed.open(&snap), Err(Error::Crypto(_))));
 
     for idx in [0, 12, snap.sealed.len() - 1] {
@@ -75,7 +75,10 @@ fn metadata_is_bound_to_the_ciphertext() {
 
 #[test]
 fn debug_hides_key_material() {
-    let text = format!("{:?}", Sealer::new("0badc0de".into(), [42u8; 32]));
+    let text = format!(
+        "{:?}",
+        Sealer::new("0badc0de".into(), &Zeroizing::new([42u8; 32]))
+    );
     assert!(text.contains("0badc0de"));
     assert!(!text.contains("42"));
 }
@@ -199,4 +202,42 @@ fn world_readable_key_file_is_refused() {
         Sealer::from_key_file(&path),
         Err(Error::Crypto(_))
     ));
+}
+
+#[cfg(unix)]
+#[test]
+fn group_accessible_key_file_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("snapshot.key");
+    Sealer::generate_key_file(&path).unwrap();
+    assert!(Sealer::from_key_file(&path).is_ok());
+    for mode in [0o640, 0o660, 0o604, 0o700] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert!(
+            matches!(Sealer::from_key_file(&path), Err(Error::Crypto(_))),
+            "mode {mode:o} must be refused"
+        );
+    }
+    // read-only for the owner is stricter than 0600 and stays accepted
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+    assert!(Sealer::from_key_file(&path).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn generate_creates_missing_parent_directories_privately() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a").join("b").join("snapshot.key");
+    Sealer::generate_key_file(&path).unwrap();
+    for sub in ["a", "a/b"] {
+        let mode = std::fs::metadata(dir.path().join(sub))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "{sub}");
+    }
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
 }

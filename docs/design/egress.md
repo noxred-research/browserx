@@ -7,7 +7,7 @@ browser --(--proxy-server=http://127.0.0.1:PORT)--> forwarder --> direct dial, o
                                                                   upstream http(s) / socks5(h) proxy --> destination
 ```
 
-The forwarder always exists for a dedicated session: with `proxy` unset it dials directly (after the destination policy); with `proxy` set it dials the upstream. Shared-browser sessions have no forwarder and use the worker's direct egress; a per-session `proxy` requires dedicated isolation.
+The forwarder always exists for a dedicated session: with `proxy` unset it dials directly (after the destination policy); with `proxy` set it dials the upstream. Shared-browser sessions also get a forwarder, one per session and applying the same destination policy, but it always dials directly: a per-session `proxy` requires dedicated isolation. The relay refuses `Target.createBrowserContext` with `proxyServer` or `proxyBypassList`, so a client cannot route a context around the forwarder.
 
 ## What the forwarder accepts
 
@@ -31,6 +31,8 @@ When `egress.block_private = true` (the default) and the session dials directly,
 - multicast, the unspecified address and other reserved ranges, and the IPv6 equivalents including IPv4-mapped, NAT64 and 6to4 forms.
 
 The check applies to the address that is actually dialed, after resolution, so a hostname that resolves to a private address is refused as well as a literal one.
+
+The same policy applies to the **upstream proxy's own address**, which a tenant supplies in `proxy.url`: the forwarder resolves the proxy host once, keeps only the addresses the policy permits and dials exactly those (no second lookup). A `proxy.url` that points at loopback, a private range or the metadata address is therefore refused unless an operator allows it in `egress.allow_cidrs`. Every failure to reach the upstream proxy (does not resolve, blocked by policy, connection refused or timed out) is reported with the same `502` body, `upstream proxy is unavailable`, so a session cannot probe internal hosts and ports through its proxy URL.
 
 `egress.allow_cidrs` lists CIDR ranges or single addresses that are exempt (at most 1024 entries), for example an internal test environment the browsers are allowed to reach:
 
@@ -59,7 +61,7 @@ Setting `block_private = false` disables the policy entirely. Do that only on wo
 | `url` scheme | Behavior |
 | --- | --- |
 | `http://`, `https://` | For `https://` the connection to the upstream is TLS-protected (built-in root certificates, independent of the system store). The forwarder opens a `CONNECT host:port` to the upstream with `Proxy-Authorization: Basic`, then tunnels. Plain-HTTP requests are sent *through the tunnel* in origin form, so gateways that only support `CONNECT` work for `http://` pages too |
-| `socks5://` | SOCKS5 with RFC 1929 username/password authentication. The forwarder resolves the name locally, checks the policy against the resolved address and sends the address |
+| `socks5://` | SOCKS5 with RFC 1929 username/password authentication. The forwarder resolves the name locally, checks the policy against the resolved address and sends the address. The proxy's own address is policy-checked as above |
 | `socks5h://` | SOCKS5 where the **upstream** resolves the name: the hostname is sent. The destination policy cannot check the address the upstream resolved to, so private-range blocking does not apply to the resolved address. Use it only when you trust the upstream's resolver and network position |
 
 Validation happens at admission: the scheme must be one of those, and the URL must not contain credentials (`user:pw@`). Put them in `username` and `password`.
@@ -86,7 +88,7 @@ Pools of rotating exits usually pin an exit by a token in the username. Two plac
 
 ## Credentials
 
-The browser is started with `--proxy-server=http://127.0.0.1:PORT` only. Upstream usernames and passwords exist in the forwarder's memory and in the session spec in the lease store; they are never put on a command line, in an environment variable of the browser, in a log line or in an API response (`password` is write-only).
+The browser is started with `--proxy-server=http://127.0.0.1:PORT` only. Upstream usernames and passwords exist in the forwarder's memory and in the session spec in the lease store; they are never put on a command line, in an environment variable of the browser, in a log line or in an API response (`password` is write-only). The in-memory copies (the `Secret` value, the rendered `Proxy-Authorization` header and the SOCKS5 credentials) are overwritten when they are dropped. The password is removed from the stored spec when the lease becomes terminal (`closed` or `lost`).
 
 ## Lifecycle
 
@@ -98,5 +100,5 @@ The forwarder starts before the browser and stops after it. On recovery a new fo
 
 - The forwarder carries the traffic of one browser; it is not a general-purpose proxy and it listens only on loopback.
 - It does not inspect, modify or capture TLS traffic: HTTPS stays a tunnel.
-- UDP (for example QUIC or WebRTC media) does not pass through an HTTP proxy. Chromium falls back to TCP for QUIC; WebRTC can reveal local addresses unless a launch profile restricts it. If that matters to you, restrict it with launch flags and network policy.
+- UDP (for example QUIC or WebRTC media) does not pass through an HTTP proxy. Chromium falls back to TCP for QUIC. Browsers that use a forwarder are started with `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`, so WebRTC cannot open UDP paths around the proxy or reveal the host's addresses; the flag is managed and a launch profile cannot change it. It is a browser-side setting, not a network control: pair it with network policy if you need a hard guarantee.
 - Whether an upstream pins, rotates or filters exits is the upstream's behavior. BrowserX only passes the username.

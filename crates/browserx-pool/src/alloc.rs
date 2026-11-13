@@ -210,7 +210,7 @@ impl Inner {
         let restore = self.load_restore_state(p).await?;
         let existing = match reservation.grant() {
             Some(Grant::SharedExisting(entry)) => Some(entry.clone()),
-            Some(Grant::SharedNew) => None,
+            Some(Grant::SharedNew(_)) => None,
             _ => {
                 return Err(Error::Internal(
                     "shared allocation without a shared grant".into(),

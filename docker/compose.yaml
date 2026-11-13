@@ -3,7 +3,7 @@
 # First run: create the snapshot key and an API key, then put the key's sha256
 # into docker/browserx.docker.toml (or mount your own config):
 #   docker compose -f docker/compose.yaml run --rm --entrypoint browserx browserx \
-#     snapshot-key new /var/lib/browserx/state/snapshot.key
+#     snapshot-key new /var/lib/browserx/keys/snapshot.key
 #   docker compose -f docker/compose.yaml run --rm --entrypoint browserx browserx keys new dev
 services:
   browserx:

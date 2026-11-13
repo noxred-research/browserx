@@ -28,12 +28,17 @@ pub fn ct_eq(a: &str, b: &str) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// `t + d`, saturating at the far future instead of returning `t` on overflow
+/// (an unchanged time would read as "already due").
 pub(crate) fn add_duration(t: OffsetDateTime, d: Duration) -> OffsetDateTime {
     time::Duration::try_from(d)
         .ok()
         .and_then(|d| t.checked_add(d))
-        .unwrap_or(t)
+        .unwrap_or(FAR_FUTURE)
 }
+
+/// The latest instant the lease records can hold.
+const FAR_FUTURE: OffsetDateTime = time::PrimitiveDateTime::MAX.assume_utc();
 
 /// Where a relay should connect, plus the guard that tracks the connection.
 pub struct RelayAccess {
@@ -128,7 +133,7 @@ impl Inner {
         let patience = self
             .cfg
             .operation_timeout
-            .saturating_mul(self.cfg.recovery_attempts + 1);
+            .saturating_mul(self.cfg.recovery_attempts.saturating_add(1));
         tokio::time::timeout(patience, ctl.lock_owned())
             .await
             .map_err(|_| Error::Timeout(format!("session {id} is busy")))
@@ -147,6 +152,64 @@ impl Inner {
         match &lease.token_digest {
             Some(stored) if ct_eq(stored, &token.digest()) => Ok(()),
             _ => Err(Error::Forbidden("invalid session token".into())),
+        }
+    }
+
+    /// Authenticates a token-bearing call from a lock-free read of the lease,
+    /// before anything queues on the session mutex or reveals session state.
+    ///
+    /// `relay` selects the uniform answer of the token-only relay route: an
+    /// unknown session, a foreign owner and a wrong token are all
+    /// [`Error::Unauthorized`]. API callers are already authenticated by key, so
+    /// they get `NotFound` for unknown or foreign sessions and `Forbidden` for a
+    /// wrong token.
+    pub(crate) async fn authenticate(
+        &self,
+        owner: Option<&str>,
+        id: SessionId,
+        token: &LeaseToken,
+        relay: bool,
+    ) -> Result<()> {
+        let lease = self.leases.get(id).await?;
+        let candidate = token.digest();
+        // Same work whether or not the session exists.
+        let stored = lease
+            .as_ref()
+            .and_then(|l| l.token_digest.as_deref())
+            .unwrap_or(candidate.as_str());
+        let digest_ok = lease.is_some() && ct_eq(stored, &candidate);
+        let Some(lease) = lease else {
+            return Err(if relay {
+                Error::Unauthorized
+            } else {
+                Error::NotFound(format!("session {id}"))
+            });
+        };
+        if let Some(owner) = owner
+            && lease.owner != owner
+        {
+            return Err(Error::NotFound(format!("session {id}")));
+        }
+        if digest_ok && lease.token_digest.is_some() {
+            Ok(())
+        } else if relay {
+            Err(Error::Unauthorized)
+        } else {
+            Err(Error::Forbidden("invalid session token".into()))
+        }
+    }
+
+    /// Runs `op` to completion in a tracked task and returns its result. If the
+    /// caller is dropped (the client disconnects) the task keeps going, so a
+    /// half-finished operation can never leak a browser, a quota slot or a
+    /// profile claim, or drop the token it just minted.
+    pub(crate) async fn run_tracked<T: Send + 'static>(
+        &self,
+        op: impl Future<Output = Result<T>> + Send + 'static,
+    ) -> Result<T> {
+        match self.tracker.spawn(op).await {
+            Ok(result) => result,
+            Err(e) => Err(Error::Internal(format!("session operation aborted: {e}"))),
         }
     }
 
@@ -220,6 +283,14 @@ impl Inner {
         if lifetime > self.cfg.max_lifetime {
             return Err(Error::InvalidRequest(format!(
                 "max_lifetime_secs exceeds the server maximum of {}",
+                self.cfg.max_lifetime.as_secs()
+            )));
+        }
+        if let Some(idle) = spec.idle_timeout_secs
+            && Duration::from_secs(idle) > self.cfg.max_lifetime
+        {
+            return Err(Error::InvalidRequest(format!(
+                "idle_timeout_secs exceeds the server maximum lifetime of {}",
                 self.cfg.max_lifetime.as_secs()
             )));
         }
@@ -384,12 +455,17 @@ impl Inner {
         token: &LeaseToken,
         mode: AttachMode,
     ) -> Result<(AttachInfo, Option<RelayAccess>)> {
+        let relay_mode = matches!(mode, AttachMode::Relay);
+        self.authenticate(owner, id, token, relay_mode).await?;
         let _guard = self.lock_session(id).await?;
         let mut lease = self.load_lease(id).await?;
         if let Some(owner) = owner {
             Self::check_owner(&lease, owner)?;
         }
-        Self::check_token(&lease, token)?;
+        if let Err(e) = Self::check_token(&lease, token) {
+            // The token was rotated while this call waited for the session.
+            return Err(if relay_mode { Error::Unauthorized } else { e });
+        }
         if lease.status.is_terminal() {
             return Err(Error::Conflict(format!(
                 "session {id} is {}",
@@ -413,13 +489,20 @@ impl Inner {
                 .recover_locked(lease, "browser not running at attach")
                 .await?;
         }
+        // Only the API attach reports (and consumes) a recovery outcome; a relay
+        // open, such as a client reconnecting its WebSocket, must leave it for
+        // the controller that asks through the API.
         let outcome = {
             let mut st = self.st();
             match st.sessions.get_mut(&id) {
-                Some(live) => live
-                    .pending_outcome
-                    .take()
-                    .unwrap_or(RecoveryOutcome::ResumedSameProcess),
+                Some(live) => {
+                    let pending = if relay_mode {
+                        live.pending_outcome
+                    } else {
+                        live.pending_outcome.take()
+                    };
+                    pending.unwrap_or(RecoveryOutcome::ResumedSameProcess)
+                }
                 None => return Err(Error::NotFound(format!("session {id}"))),
             }
         };
@@ -528,6 +611,7 @@ impl Inner {
         expected: Generation,
         ttl: Option<Duration>,
     ) -> Result<SessionLease> {
+        self.authenticate(Some(&owner), id, &token, false).await?;
         let _guard = self.lock_session(id).await?;
         let mut lease = self.load_lease(id).await?;
         Self::check_owner(&lease, &owner)?;
@@ -561,6 +645,7 @@ impl Inner {
         token: LeaseToken,
         expected: Generation,
     ) -> Result<(SessionLease, LeaseToken)> {
+        self.authenticate(Some(&owner), id, &token, false).await?;
         let _guard = self.lock_session(id).await?;
         let mut lease = self.load_lease(id).await?;
         Self::check_owner(&lease, &owner)?;
@@ -587,6 +672,7 @@ impl Inner {
         id: SessionId,
         token: LeaseToken,
     ) -> Result<SnapshotMeta> {
+        self.authenticate(Some(&owner), id, &token, false).await?;
         let _guard = self.lock_session(id).await?;
         let mut lease = self.load_lease(id).await?;
         Self::check_owner(&lease, &owner)?;
@@ -621,6 +707,9 @@ impl Inner {
         }
         if lease.status.is_terminal() {
             return Ok(lease);
+        }
+        if let Some(token) = &token {
+            self.authenticate(None, id, token, false).await?;
         }
         let _guard = self.lock_session(id).await?;
         let mut lease = self.load_lease(id).await?;

@@ -16,9 +16,29 @@ impl Inner {
         let now = self.clock.now();
         if let Ok(leases) = self
             .leases
-            .list(None, Some(&[SessionStatus::Active, SessionStatus::Idle]))
+            .list(
+                None,
+                Some(&[
+                    SessionStatus::Active,
+                    SessionStatus::Idle,
+                    SessionStatus::Draining,
+                    SessionStatus::Recovering,
+                ]),
+            )
             .await
         {
+            let (transient, leases): (Vec<_>, Vec<_>) = leases.into_iter().partition(|l| {
+                matches!(
+                    l.status,
+                    SessionStatus::Draining | SessionStatus::Recovering
+                )
+            });
+            join_all(
+                transient
+                    .into_iter()
+                    .map(|lease| self.reap_stuck(lease, now)),
+            )
+            .await;
             let live: Vec<(SessionLease, usize)> = {
                 let st = self.st();
                 leases
@@ -63,6 +83,67 @@ impl Inner {
             }
         }
         self.sweep_and_retry().await;
+    }
+
+    /// Finishes a `draining` or `recovering` lease that nothing is working on.
+    ///
+    /// Every operation holds the session's control mutex from its first lease
+    /// change to its last, so a transient lease whose mutex is free was left
+    /// behind by a failed compare-and-swap or an error path. Left alone it would
+    /// hold the owner's quota, the profile claim and possibly a browser until
+    /// the worker restarts. `draining` is released again, an expired `recovering`
+    /// lease is released, and a live one gets another recovery attempt.
+    async fn reap_stuck(self: &Arc<Self>, lease: SessionLease, now: time::OffsetDateTime) {
+        let id = lease.session_id;
+        let Some(ctl) = self.live_ctl(id) else {
+            return;
+        };
+        let Ok(guard) = ctl.try_lock_owned() else {
+            return;
+        };
+        let Ok(mut lease) = self.load_lease(id).await else {
+            return;
+        };
+        let release_reason = match lease.status {
+            SessionStatus::Draining => Some("release retried by the reaper"),
+            SessionStatus::Recovering if lease.is_expired(now) => Some("lease expired"),
+            SessionStatus::Recovering => None,
+            _ => return,
+        };
+        if let Some(reason) = release_reason {
+            drop(guard);
+            if let Err(e) = self
+                .clone()
+                .release_impl(OwnedCaller::System, id, None, None, reason)
+                .await
+            {
+                tracing::warn!(session = %id, error = %e, "reaper could not finish a stuck release");
+            }
+            return;
+        }
+        tracing::warn!(session = %id, "retrying a recovery that was left unfinished");
+        let binding = self.live_binding(id).and_then(|(b, _)| b);
+        if let Some(browser) = &binding {
+            if self.browser_gone(browser).await {
+                let others = self.retire_dead_browser(browser).await;
+                self.spawn_recoveries(others, browser.id, Some(id));
+            } else {
+                // The browser is fine after all: put the lease back.
+                let prior = lease.generation;
+                if lease.transition(SessionStatus::Idle, None).is_ok()
+                    && let Err(e) = self.leases.compare_and_swap(prior, &lease).await
+                {
+                    tracing::warn!(session = %id, error = %e, "could not restore a recovering lease");
+                }
+                return;
+            }
+        }
+        if let Err(e) = self
+            .recover_locked(lease, "recovery retried by the reaper")
+            .await
+        {
+            tracing::warn!(session = %id, error = %e, "retried recovery did not produce a browser");
+        }
     }
 
     async fn sweep_and_retry(self: &Arc<Self>) {

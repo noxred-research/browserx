@@ -15,6 +15,11 @@ A commented example is in [`examples/browserx.toml`](../../examples/browserx.tom
 | `listen` | `"127.0.0.1:7690"` | Address of the public listener: `/v1/...` and `/cdp/...` |
 | `ops_listen` | `"127.0.0.1:7691"` | Address of the ops listener: `/healthz`, `/readyz`, `/metrics` |
 | `public_base_url` | `"http://127.0.0.1:7690"` | The externally reachable base URL. `cdp_url` values are built from it with the scheme switched to `ws`/`wss`. Set it to the address clients really use (for example behind a TLS reverse proxy) |
+| `max_relay_connections_per_session` | `4` | Relay (WebSocket) connections one session may have open. More are refused with `429 capacity`. `1`..`256` |
+| `scoped_relay_max_message_bytes` | `16777216` | Largest WebSocket message, in bytes, on a shared-session relay (dedicated relays allow 64 MiB). `65536`..`67108864` |
+| `header_read_timeout_secs` | `10` | Time a client has to send a complete request head on either listener; also closes idle keep-alive connections. `1`..`300` |
+| `max_connections` | `1024` | Open connections the public listener keeps (relay connections count); further ones are closed at once |
+| `ops_max_connections` | `64` | The same for the ops listener |
 
 Both listeners speak plaintext. Keep them on loopback or a trusted network, or terminate TLS in front. See [isolation and security](../design/isolation-and-security.md#transport).
 
@@ -55,7 +60,7 @@ At least one key is required to start. Names are 1 to 64 characters without cont
 | --- | --- | --- |
 | `default_ttl_secs` | `600` | Time-to-live when the request names none. Must not exceed `max_ttl_secs` |
 | `max_ttl_secs` | `3600` | Largest time-to-live a request may ask for (a larger value is refused); also bounds renewals |
-| `max_lifetime_secs` | `86400` | Largest absolute lifetime a request may ask for, and the default. Renewals cannot extend past it |
+| `max_lifetime_secs` | `86400` | Largest absolute lifetime a request may ask for, and the default. Renewals cannot extend past it. A request's `idle_timeout_secs` may not exceed it either. Every duration in this section is limited to ten years |
 | `default_idle_timeout_secs` | `300` | Release a session this long after its last controller detached, when the request names no idle timeout |
 | `snapshot_interval_secs` | `60` | Interval of periodic snapshots for `snapshot` sessions |
 | `snapshot_keep` | `5` | Snapshot versions kept per profile; older ones are pruned. Must be at least 1 |
@@ -66,7 +71,7 @@ At least one key is required to start. Names are 1 to 64 characters without cont
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `state_dir` | `"./.browserx"` | Root of everything BrowserX persists. The worker creates it, `snapshots/`, `profiles/` and `tmp/` with mode `0700` |
-| `snapshot_key_file` | `"./.browserx/snapshot.key"` | The active snapshot encryption key (create with `browserx snapshot-key new`). Seals every new snapshot. Mode `0600` |
+| `snapshot_key_file` | `"./.browserx-keys/snapshot.key"` | The active snapshot encryption key (create with `browserx snapshot-key new`). Seals every new snapshot. Mode `0600`. Must be **outside** `state_dir`: browsers run as the worker's uid, so a key inside the state directory could be read through a browser. A path inside `state_dir` is a startup error |
 | `retired_snapshot_key_files` | `[]` | Earlier key files that may only open old snapshots; see [key rotation](operations.md#snapshot-key). Each needs a distinct `key_id` |
 
 Layout under `state_dir`:
@@ -78,6 +83,7 @@ Layout under `state_dir`:
 | `profiles/<profile_id>/` | Persistent profile directories (`0700`), each with `.browserx.lock` |
 | `profiles/.owners/` | One small file per persistent identity naming the API key (owner) that created it |
 | `tmp/` | Temporary user-data directories of ephemeral sessions, deleted after the browser is confirmed dead |
+| `downloads/<session_id>/` | Where a relay client's browser downloads land (the relay forces the path); removed when the session's last relay connection closes and emptied at startup |
 
 ## `[health]`
 
@@ -99,7 +105,8 @@ Layout under `state_dir`:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `default_launch_profile` | `"default"` | Profile used when a session names none. Must exist |
-| `startup_timeout_secs` | `30` | How long a browser launch may take before the process is killed |
+| `startup_timeout_secs` | `30` | How long a browser launch may take before the process is killed. At most `600` (larger values are a startup error) |
+| `cdp_max_message_bytes` | `67108864` | Largest single reply the worker's own DevTools connection to a browser accepts (1 MiB to 256 MiB). A bigger reply drops that connection, which is reopened on the next use; the browser keeps running |
 
 ### `[runtime.launch_profiles.<name>]`
 

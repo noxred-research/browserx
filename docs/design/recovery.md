@@ -15,7 +15,7 @@ Every attach reports one of four outcomes. The outcome describes how the session
 
 Rules for how the outcome is reported:
 
-- If the browser is alive when the client attaches, the outcome is `resumed_same_process`, **unless** the session was recovered since the last attach. In that case the lease's `last_recovery` is reported once, on the first attach after the recovery, and later attaches report `resumed_same_process`. A controller that was disconnected while recovery happened therefore always learns about it.
+- If the browser is alive when the client attaches, the outcome is `resumed_same_process`, **unless** the session was recovered since the last attach. In that case the lease's `last_recovery` is reported once, on the first API attach (`POST .../attach`) after the recovery, and later attaches report `resumed_same_process`. A controller that was disconnected while recovery happened therefore always learns about it. Opening the relay WebSocket does not consume the pending outcome, so a client that reconnects its socket first and calls `attach` afterwards still sees it.
 - If the browser is dead when the client attaches and recovery is allowed, the worker recovers synchronously (bounded) and reports the recovery's outcome.
 - `POST /v1/sessions` also returns an `outcome`: `fresh_process` for a new browser, `restored_from_profile` or `restored_from_snapshot` when the new session started from an existing `profile_id`.
 
@@ -47,13 +47,17 @@ The health monitor probes every browser every `health.probe_interval_secs` with 
 4. The lease gets a new `browser_id`, generation + 1, `recoveries` + 1, and `last_recovery` set to the outcome. A relay connection that was bound to the old browser is closed; clients reconnect.
 5. The lease returns to `idle` (it becomes `active` at the next attach), and an event is emitted for metrics (`browserx_recoveries_total{outcome}`).
 
-Shared-isolation sessions recover by creating a fresh context (or a fresh shared browser if theirs died). If the shared browser died, every session that had a context in it recovers independently.
+Shared-isolation sessions recover by creating a fresh context (or a fresh shared browser if theirs died). If the shared browser died, every session that had a context in it recovers independently, but they share the replacement: a shared browser that is still launching counts as a candidate, so concurrent recoveries wait for it instead of each starting another browser. If the replacement fails to launch, the waiters retry and one of them launches the next.
+
+A recovery that was interrupted (a failed lease write, say) leaves the lease in `recovering`; the reaper retries it, or releases it once the lease has expired.
 
 A failed recovery is retried, at most **3 attempts**. After the third failure the session is `lost`.
 
 ## Startup reconciliation
 
-Browsers die with the worker that started them. When a worker starts, any lease it finds in a non-terminal state is therefore orphaned: its browser no longer exists, whatever the record says. The worker sorts them:
+A browser runs in its own process group and can outlive a crashed worker, so a starting worker first sweeps: every launched browser has a record (`<state_dir>/tmp/<browser_id>.json`: owner, process id, process group, start time, user-data directory). For each record whose owning worker is gone, the worker kills the process group **only if** a process in it carries the exact `--user-data-dir=` argument of the record (and, for the leader, the recorded start time, so a recycled process id is never signalled), then removes the temporary directory and the record. Records of a worker that is still running are left alone, and persistent profile directories are never deleted. Temporary directories without a record are removed once they are older than ten minutes. The sweep needs `/proc` (Linux); elsewhere it logs a warning and does nothing.
+
+Any lease the worker then finds in a non-terminal state is orphaned: its browser no longer exists, whatever the record says. The worker sorts them:
 
 - Leases that were `queued`, `allocating` or `draining` when the worker stopped, and leases that have passed their expiry, are closed: the session never finished starting or was already ending.
 - Leases that were `active`, `idle` or `recovering` are recovered according to their recovery policy (outcome `restored_from_profile`, `restored_from_snapshot` or `fresh_process`), or marked `lost` when their policy is `none` or recovery fails.

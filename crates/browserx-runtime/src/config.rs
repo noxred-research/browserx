@@ -17,7 +17,17 @@ const MANAGED_FLAGS: &[&str] = &[
     "proxy-auto-detect",
     "no-proxy-server",
     "headless",
+    "force-webrtc-ip-handling-policy",
+    "webrtc-ip-handling-policy",
 ];
+
+/// Longest startup timeout accepted; keeps deadline arithmetic far from overflow
+/// and a stuck launch from holding a warm-pool slot for hours.
+pub const MAX_STARTUP_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Smallest and largest accepted `cdp_max_message_bytes`.
+const MIN_CDP_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_CDP_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
+const DEFAULT_CDP_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// How to start one flavour of browser.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,7 +38,7 @@ pub struct LaunchProfile {
     /// Run without a display (`--headless=new`). Default `true`.
     pub headless: bool,
     /// Extra command-line flags. Managed flags (remote debugging, user-data-dir,
-    /// proxy, headless) are rejected.
+    /// proxy, headless, WebRTC IP handling) are rejected.
     pub args: Vec<String>,
     /// Extra environment variables for the browser process.
     pub env: BTreeMap<String, String>,
@@ -91,12 +101,20 @@ pub struct RuntimeConfig {
     pub default_launch_profile: String,
     /// Named launch profiles. When empty, a `default` profile is added.
     pub launch_profiles: BTreeMap<String, LaunchProfile>,
-    /// How long a launch may take before the process is killed. Default 30 s.
+    /// How long a launch may take before the process is killed. Default 30 s,
+    /// at most [`MAX_STARTUP_TIMEOUT`] (10 minutes).
     /// Serialized as whole seconds under `startup_timeout_secs`.
     #[serde(rename = "startup_timeout_secs", with = "secs")]
     pub startup_timeout: Duration,
-    /// Parent directory for temporary user-data directories.
+    /// Parent directory for temporary user-data directories and for the
+    /// per-browser records that let [`crate::ChromiumRuntime::sweep_orphans`]
+    /// clean up after a crashed worker.
     pub temp_root: PathBuf,
+    /// Largest single reply the runtime's own DevTools connection to a browser
+    /// accepts. A bigger reply (a page cannot normally cause one) drops that
+    /// connection; the runtime reconnects on the next call. Default 64 MiB,
+    /// between 1 MiB and 256 MiB.
+    pub cdp_max_message_bytes: usize,
 }
 
 impl Default for RuntimeConfig {
@@ -106,6 +124,7 @@ impl Default for RuntimeConfig {
             launch_profiles: BTreeMap::new(),
             startup_timeout: Duration::from_secs(30),
             temp_root: std::env::temp_dir().join("browserx"),
+            cdp_max_message_bytes: DEFAULT_CDP_MESSAGE_BYTES,
         }
     }
 }
@@ -136,6 +155,17 @@ impl RuntimeConfig {
             return Err(Error::InvalidRequest(
                 "startup timeout must be positive".into(),
             ));
+        }
+        if self.startup_timeout > MAX_STARTUP_TIMEOUT {
+            return Err(Error::InvalidRequest(format!(
+                "startup timeout must be at most {} seconds",
+                MAX_STARTUP_TIMEOUT.as_secs()
+            )));
+        }
+        if !(MIN_CDP_MESSAGE_BYTES..=MAX_CDP_MESSAGE_BYTES).contains(&self.cdp_max_message_bytes) {
+            return Err(Error::InvalidRequest(format!(
+                "cdp_max_message_bytes must be between {MIN_CDP_MESSAGE_BYTES} and {MAX_CDP_MESSAGE_BYTES}"
+            )));
         }
         Ok(self)
     }
@@ -179,6 +209,8 @@ mod tests {
             "--proxy-bypass-list=*",
             "--proxy-pac-url=http://x/pac",
             "--no-proxy-server",
+            "--force-webrtc-ip-handling-policy=default",
+            "--webrtc-ip-handling-policy=default",
             "--headless=old",
             "-user-data-dir=/x",
         ] {
@@ -231,6 +263,40 @@ mod tests {
         cfg.launch_profiles
             .insert("other".into(), LaunchProfile::default());
         assert!(cfg.validated().is_err());
+    }
+
+    #[test]
+    fn startup_timeout_is_bounded() {
+        let ok = RuntimeConfig {
+            startup_timeout: MAX_STARTUP_TIMEOUT,
+            ..RuntimeConfig::default()
+        };
+        assert!(ok.validated().is_ok());
+        for secs in [MAX_STARTUP_TIMEOUT.as_secs() + 1, u64::MAX] {
+            let cfg = RuntimeConfig {
+                startup_timeout: Duration::from_secs(secs),
+                ..RuntimeConfig::default()
+            };
+            assert!(
+                matches!(cfg.validated(), Err(Error::InvalidRequest(_))),
+                "{secs} s must be refused"
+            );
+        }
+        let huge: RuntimeConfig =
+            serde_json::from_str(&format!(r#"{{"startup_timeout_secs": {}}}"#, u64::MAX)).unwrap();
+        assert!(huge.validated().is_err());
+    }
+
+    #[test]
+    fn cdp_message_limit_is_bounded() {
+        for bytes in [0, 1024, 257 * 1024 * 1024] {
+            let cfg = RuntimeConfig {
+                cdp_max_message_bytes: bytes,
+                ..RuntimeConfig::default()
+            };
+            assert!(cfg.validated().is_err(), "{bytes}");
+        }
+        assert!(RuntimeConfig::default().validated().is_ok());
     }
 
     #[test]

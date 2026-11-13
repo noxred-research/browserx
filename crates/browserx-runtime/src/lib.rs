@@ -13,16 +13,22 @@
 //! profiles that try to set them are rejected up front.
 //!
 //! Process supervision uses POSIX process groups and signals, so this crate
-//! targets Unix hosts.
+//! targets Unix hosts. A browser outlives a crashed worker (it runs in its own
+//! process group), so every launch is recorded under the configured temp root and
+//! [`ChromiumRuntime::sweep_orphans`] kills verified leftovers and removes stale
+//! temporary directories at the next startup.
 
 mod chromium;
 mod config;
+mod control;
 mod discover;
 mod lock;
+mod orphans;
 mod process;
 mod state;
 
 pub use chromium::ChromiumRuntime;
-pub use config::{LaunchProfile, RuntimeConfig};
+pub use config::{LaunchProfile, MAX_STARTUP_TIMEOUT, RuntimeConfig};
 pub use discover::discover_chromium;
 pub use lock::ProfileLock;
+pub use orphans::SweepReport;

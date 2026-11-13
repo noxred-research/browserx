@@ -15,6 +15,7 @@ tokio-util.workspace = true
 serde.workspace = true
 url.workspace = true
 base64.workspace = true
+zeroize.workspace = true
 tracing.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

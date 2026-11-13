@@ -40,6 +40,7 @@ The worker always starts the browser with a set of **managed** flags:
 | `--remote-debugging-port=0` (and every `--remote-debugging-*`) | The worker needs a private loopback DevTools endpoint and must be the only one that has it |
 | `--user-data-dir=<dir>` | The profile directory is part of the persistence contract and the lock |
 | `--proxy-server`, `--proxy-bypass-list`, `--proxy-pac-url`, `--proxy-auto-detect`, `--no-proxy-server` | Egress goes through the forwarder or nowhere |
+| `--force-webrtc-ip-handling-policy`, `--webrtc-ip-handling-policy` | With a forwarder, WebRTC may use only proxied UDP (`disable_non_proxied_udp`) |
 | `--headless=new` | Controlled by the `headless` key |
 | `--no-first-run --no-default-browser-check --disable-background-networking --disable-sync --disable-default-apps --password-store=basic --use-mock-keychain` | A quiet, predictable browser without prompts or stored-password back ends |
 

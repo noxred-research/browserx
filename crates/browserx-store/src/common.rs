@@ -54,3 +54,26 @@ pub(crate) fn micros(t: OffsetDateTime) -> i64 {
     let us = t.unix_timestamp_nanos() / 1000;
     i64::try_from(us).unwrap_or(if us < 0 { i64::MIN } else { i64::MAX })
 }
+
+/// A lease holds the upstream proxy password only so recovery can relaunch the
+/// forwarder. A terminal lease (`lost`, `closed`) is never recovered, so the
+/// password is dropped before the record is stored. Returns `None` when there
+/// is nothing to scrub.
+pub(crate) fn scrubbed_if_terminal(lease: &SessionLease) -> Option<SessionLease> {
+    if !lease.status.is_terminal() {
+        return None;
+    }
+    let has_password = lease
+        .spec
+        .proxy
+        .as_ref()
+        .is_some_and(|p| p.password.is_some());
+    if !has_password {
+        return None;
+    }
+    let mut copy = lease.clone();
+    if let Some(proxy) = copy.spec.proxy.as_mut() {
+        proxy.password = None;
+    }
+    Some(copy)
+}

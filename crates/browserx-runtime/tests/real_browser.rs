@@ -519,6 +519,15 @@ async fn proxy_flags_reach_the_browser() {
         })
         .await
         .unwrap();
+    // WebRTC must not open UDP paths around the proxy (and so around the
+    // egress policy behind it).
+    // (Chromium may rewrite its own command line into one space-joined string.)
+    let cmdline = std::fs::read(format!("/proc/{}/cmdline", handle.pid().unwrap())).unwrap();
+    let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+    assert!(
+        cmdline.contains("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"),
+        "missing WebRTC policy flag in {cmdline}"
+    );
     let cdp = connect(handle.as_ref()).await;
     // Chromium reports its command line through SystemInfo.
     let info = cdp
@@ -552,4 +561,284 @@ async fn proxy_flags_reach_the_browser() {
     );
     cdp.close().await;
     handle.shutdown_confirmed().await.unwrap();
+}
+
+// ---------------------------------------------------------------- capture integrity
+
+/// A page can override `JSON.stringify`, `Object.entries` and friends. Capture
+/// must not depend on any script that runs in the page: the origin and the
+/// entries come from the browser.
+#[tokio::test]
+async fn capture_ignores_page_script_forging_origin_and_storage() {
+    let Some(exe) = chromium() else { return };
+    let temp = tempfile::tempdir().unwrap();
+    let rt = runtime(&exe, temp.path());
+    let (addr, _hits) = serve().await;
+    let origin = format!("http://{addr}");
+
+    let browser = rt.launch(request(None)).await.unwrap();
+    let cdp = connect(browser.as_ref()).await;
+    let ctx = browser.create_context().await.unwrap();
+    let target = open_page(&cdp, &format!("{origin}/index.html"), Some(&ctx)).await;
+    eventually("page origin", || async {
+        (evaluate(&cdp, &target, "location.origin").await == json!(origin)).then_some(())
+    })
+    .await;
+    // Real state, then a hostile page that rewrites every primitive a
+    // script-based reader would use to claim another origin with chosen entries.
+    evaluate(&cdp, &target, "localStorage.setItem('real','yes'); 1").await;
+    evaluate(
+        &cdp,
+        &target,
+        r#"(() => {
+            const forged = JSON.stringify(['http://victim.example', [['planted', '1']]]);
+            JSON.stringify = () => forged;
+            Object.entries = () => [['planted', '1']];
+            Object.defineProperty(window, 'location', { value: { origin: 'http://victim.example' } });
+            return 1;
+        })()"#,
+    )
+    .await;
+
+    let captured = browser.capture_state(Some(&ctx)).await.unwrap();
+    assert!(
+        captured
+            .origins
+            .iter()
+            .all(|o| o.origin != "http://victim.example"),
+        "forged origin captured: {:?}",
+        captured.origins
+    );
+    let storage = local_storage(&captured, &origin).expect("the real origin is captured");
+    assert_eq!(storage, [("real".to_owned(), "yes".to_owned())]);
+    assert!(
+        captured
+            .origins
+            .iter()
+            .flat_map(|o| &o.local_storage)
+            .all(|(k, _)| k != "planted"),
+        "forged entry captured"
+    );
+
+    cdp.close().await;
+    browser.shutdown_confirmed().await.unwrap();
+}
+
+/// Sets `localStorage.big` to `chars` characters on a fresh origin in `context`.
+async fn fill_origin(cdp: &CdpClient, context: &ContextId, chars: usize) -> String {
+    let (addr, _hits) = serve().await;
+    let origin = format!("http://{addr}");
+    let target = open_page(cdp, &format!("{origin}/"), Some(context)).await;
+    eventually("page origin", || async {
+        (evaluate(cdp, &target, "location.origin").await == json!(origin)).then_some(())
+    })
+    .await;
+    evaluate(
+        cdp,
+        &target,
+        &format!("localStorage.setItem('big', 'x'.repeat({chars})); 1"),
+    )
+    .await;
+    origin
+}
+
+#[tokio::test]
+async fn capture_beyond_the_total_byte_budget_is_a_typed_error() {
+    let Some(exe) = chromium() else { return };
+    let temp = tempfile::tempdir().unwrap();
+    let rt = runtime(&exe, temp.path());
+    let browser = rt.launch(request(None)).await.unwrap();
+    let cdp = connect(browser.as_ref()).await;
+    let ctx = browser.create_context().await.unwrap();
+
+    // Each origin is under the 5 MiB per-origin limit; together they pass the
+    // 48 MiB capture budget (and so would pass the 64 MiB sealed limit soon).
+    const CHARS: usize = 4_500_000;
+    let mut origins = Vec::new();
+    for _ in 0..3 {
+        origins.push(fill_origin(&cdp, &ctx, CHARS).await);
+    }
+    let small = browser.capture_state(Some(&ctx)).await.unwrap();
+    assert_eq!(
+        small.origins.len(),
+        3,
+        "within budget everything is captured"
+    );
+
+    for _ in 0..9 {
+        origins.push(fill_origin(&cdp, &ctx, CHARS).await);
+    }
+    match browser.capture_state(Some(&ctx)).await {
+        Err(Error::InvalidRequest(message)) => {
+            assert!(message.contains("snapshot budget"), "{message}");
+        }
+        other => panic!("expected a budget error, got {other:?}"),
+    }
+    // The browser is fine; state within budget can still be captured elsewhere.
+    assert!(matches!(browser.health().await, RuntimeHealth::Healthy));
+    assert!(browser.capture_state(None).await.is_ok());
+
+    cdp.close().await;
+    browser.shutdown_confirmed().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_oversized_reply_closes_the_control_connection_but_not_the_browser() {
+    let Some(exe) = chromium() else { return };
+    let temp = tempfile::tempdir().unwrap();
+    let mut cfg = RuntimeConfig {
+        temp_root: temp.path().to_path_buf(),
+        cdp_max_message_bytes: 1024 * 1024,
+        ..RuntimeConfig::default()
+    };
+    cfg.launch_profiles.insert(
+        "default".into(),
+        LaunchProfile {
+            executable: Some(exe.clone()),
+            args: vec!["--no-sandbox".into(), "--disable-gpu".into()],
+            ..LaunchProfile::default()
+        },
+    );
+    let rt = ChromiumRuntime::new(cfg).unwrap();
+    let browser = rt.launch(request(None)).await.unwrap();
+    let cdp = connect(browser.as_ref()).await;
+    let ctx = browser.create_context().await.unwrap();
+
+    let big = fill_origin(&cdp, &ctx, 2_000_000).await;
+    let (addr, _hits) = serve().await;
+    let small = format!("http://{addr}");
+    let target = open_page(&cdp, &format!("{small}/"), Some(&ctx)).await;
+    eventually("page origin", || async {
+        (evaluate(&cdp, &target, "location.origin").await == json!(small)).then_some(())
+    })
+    .await;
+    evaluate(&cdp, &target, "localStorage.setItem('ok','1'); 1").await;
+
+    // The big origin's reply passes the 1 MiB limit: that origin is skipped, the
+    // connection is replaced mid-capture and the small origin is still captured.
+    let captured = browser.capture_state(Some(&ctx)).await.unwrap();
+    assert!(local_storage(&captured, &big).is_none());
+    assert_eq!(
+        local_storage(&captured, &small).unwrap(),
+        [("ok".to_owned(), "1".to_owned())]
+    );
+    // And again: nothing is permanently broken.
+    assert!(browser.capture_state(Some(&ctx)).await.is_ok());
+    assert!(matches!(browser.health().await, RuntimeHealth::Healthy));
+    let second = browser.create_context().await.unwrap();
+    browser.dispose_context(&second).await.unwrap();
+
+    cdp.close().await;
+    browser.shutdown_confirmed().await.unwrap();
+}
+
+// ---------------------------------------------------------------- worker crash
+
+/// Not a test of its own: the child half of
+/// [`sweep_kills_a_browser_orphaned_by_a_crashed_worker`]. It launches a browser,
+/// announces the pid and then waits to be killed like a crashing worker.
+#[tokio::test]
+async fn orphan_launcher_helper() {
+    let Ok(root) = std::env::var("BROWSERX_ORPHAN_HELPER_TEMP") else {
+        return;
+    };
+    let Some(exe) = chromium() else { return };
+    let handle = runtime(&exe, Path::new(&root))
+        .launch(request(None))
+        .await
+        .unwrap();
+    println!("ORPHAN_PID={}", handle.pid().unwrap());
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    drop(handle);
+}
+
+#[tokio::test]
+async fn sweep_kills_a_browser_orphaned_by_a_crashed_worker() {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+
+    let Some(exe) = chromium() else { return };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("tmp");
+
+    // A worker process that launches a browser and is then killed outright.
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let worker = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "orphan_launcher_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("BROWSERX_ORPHAN_HELPER_TEMP", &root)
+        .env("BROWSERX_CHROMIUM_PATH", &exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut worker = KillOnDrop(worker);
+    let stdout = worker.0.stdout.take().unwrap();
+    let pid: u32 = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+                // libtest has already printed "test <name> ... " on this line
+                .find_map(|line| {
+                    line.split_once("ORPHAN_PID=")
+                        .map(|(_, pid)| pid.to_owned())
+                })
+        }),
+    )
+    .await
+    .expect("the helper announced a browser in time")
+    .unwrap()
+    .expect("helper output")
+    .parse()
+    .unwrap();
+    worker.0.kill().unwrap();
+    worker.0.wait().unwrap();
+
+    // The browser outlives the worker, and the worker left its traces.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(pid_alive(pid), "browser did not survive the worker crash");
+    assert!(!dir_is_empty(&root));
+
+    let report = runtime(&exe, &root).sweep_orphans().await.unwrap();
+    assert_eq!(report.killed, 1, "{report:?}");
+    assert_eq!(report.removed_dirs, 1, "{report:?}");
+    eventually("orphan to die", || async {
+        (!pid_alive(pid)).then_some(())
+    })
+    .await;
+    assert!(dir_is_empty(&root), "stale directory or record left behind");
+
+    // Nothing left: a second sweep is a no-op.
+    let again = runtime(&exe, &root).sweep_orphans().await.unwrap();
+    assert_eq!(again, browserx_runtime::SweepReport::default());
+}
+
+#[tokio::test]
+async fn sweep_leaves_a_running_workers_browsers_alone() {
+    let Some(exe) = chromium() else { return };
+    let temp = tempfile::tempdir().unwrap();
+    let rt = runtime(&exe, temp.path());
+    let handle = rt.launch(request(None)).await.unwrap();
+    let pid = handle.pid().unwrap();
+
+    let report = rt.sweep_orphans().await.unwrap();
+    assert_eq!(report, browserx_runtime::SweepReport::default());
+    assert!(pid_alive(pid));
+    assert!(matches!(handle.health().await, RuntimeHealth::Healthy));
+
+    handle.shutdown_confirmed().await.unwrap();
+    assert!(dir_is_empty(temp.path()), "shutdown removes dir and record");
 }

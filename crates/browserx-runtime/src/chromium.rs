@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::config::{LaunchProfile, RuntimeConfig};
+use crate::control::Control;
 use crate::discover::discover_chromium;
+use crate::orphans::{self, RecordGuard, SweepReport, TEMP_DIR_PREFIX};
 use crate::process::{self, Proc};
 use crate::state;
 
@@ -34,6 +36,10 @@ const BASE_FLAGS: &[&str] = &[
     "--password-store=basic",
     "--use-mock-keychain",
 ];
+/// Added when the browser's traffic goes through the egress forwarder: WebRTC
+/// may then only use UDP that is itself proxied, so it can neither reveal the
+/// host's real address nor reach destinations the forwarder's policy refuses.
+const WEBRTC_FLAG: &str = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp";
 
 /// Launches and supervises local Chromium processes.
 #[derive(Debug)]
@@ -47,6 +53,37 @@ impl ChromiumRuntime {
         Ok(Self {
             cfg: cfg.validated()?,
         })
+    }
+
+    /// Kills browsers left behind by a worker that crashed, and removes the
+    /// temporary directories they used.
+    ///
+    /// Call once at startup, before launching anything. Each launched browser
+    /// leaves a record under the configured `temp_root`; a record whose owning
+    /// worker is gone is acted on only if the recorded process is verifiably the
+    /// browser (same process group, exact `--user-data-dir=` argument, same start
+    /// time). Records of workers that are still running are left alone. Requires
+    /// `/proc`; elsewhere it logs a warning and does nothing.
+    pub async fn sweep_orphans(&self) -> Result<SweepReport> {
+        let root = self.cfg.temp_root.clone();
+        let report = tokio::task::spawn_blocking(move || orphans::sweep(&root))
+            .await
+            .map_err(|e| Error::Internal(format!("orphan sweep failed: {e}")))?;
+        if report != SweepReport::default() {
+            tracing::warn!(
+                killed = report.killed,
+                removed_dirs = report.removed_dirs,
+                "cleaned up after a previous worker"
+            );
+        }
+        Ok(report)
+    }
+
+    fn cdp_limits(&self) -> CdpLimits {
+        CdpLimits {
+            max_message_bytes: self.cfg.cdp_max_message_bytes,
+            ..CdpLimits::default()
+        }
     }
 
     fn profile(&self, name: Option<&str>) -> Result<&LaunchProfile> {
@@ -90,6 +127,7 @@ fn build_args(
     if let Some(proxy) = proxy {
         args.push(format!("--proxy-server={proxy}"));
         args.push("--proxy-bypass-list=<-loopback>".to_owned());
+        args.push(WEBRTC_FLAG.to_owned());
     }
     args.extend(
         profile
@@ -106,25 +144,6 @@ impl BrowserRuntime for ChromiumRuntime {
         let profile = self.profile(request.launch_profile.as_deref())?;
         let executable = resolve_executable(profile)?;
 
-        let (user_data_dir, temp) = match &request.user_data_dir {
-            Some(dir) => {
-                tokio::fs::create_dir_all(dir)
-                    .await
-                    .map_err(|e| Error::Storage(format!("cannot create user-data dir: {e}")))?;
-                (dir.clone(), None)
-            }
-            None => {
-                tokio::fs::create_dir_all(&self.cfg.temp_root)
-                    .await
-                    .map_err(|e| Error::Storage(format!("cannot create temp root: {e}")))?;
-                let temp = tempfile::Builder::new()
-                    .prefix("browserx-")
-                    .tempdir_in(&self.cfg.temp_root)
-                    .map_err(|e| Error::Storage(format!("cannot create temp dir: {e}")))?;
-                (temp.path().to_path_buf(), Some(temp))
-            }
-        };
-
         if request.persona_seed.is_empty()
             || !request
                 .persona_seed
@@ -135,23 +154,53 @@ impl BrowserRuntime for ChromiumRuntime {
                 "persona seed must be [A-Za-z0-9_]+".into(),
             ));
         }
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.cfg.startup_timeout)
+            .ok_or_else(|| Error::InvalidRequest("startup timeout is too large".into()))?;
+
+        let (user_data_dir, temp) = match &request.user_data_dir {
+            Some(dir) => {
+                tokio::fs::create_dir_all(dir)
+                    .await
+                    .map_err(|e| Error::Storage(format!("cannot create user-data dir: {e}")))?;
+                (dir.clone(), None)
+            }
+            None => {
+                orphans::ensure_private_dir(&self.cfg.temp_root)?;
+                let temp = tempfile::Builder::new()
+                    .prefix(TEMP_DIR_PREFIX)
+                    .tempdir_in(&self.cfg.temp_root)
+                    .map_err(|e| Error::Storage(format!("cannot create temp dir: {e}")))?;
+                (temp.path().to_path_buf(), Some(temp))
+            }
+        };
+        // The record exists before the browser does, so a crash at any later
+        // point leaves something the next worker's sweep can act on.
+        let mut record = RecordGuard::create(
+            &self.cfg.temp_root,
+            request.browser_id,
+            &user_data_dir,
+            temp.as_ref().map(TempDir::path),
+        )?;
+
         let args = build_args(
             profile,
             &user_data_dir,
             request.proxy_server.as_deref(),
             &request.persona_seed,
         );
-        let deadline = tokio::time::Instant::now() + self.cfg.startup_timeout;
-        let (proc, ws_url) =
-            process::spawn(&executable, &args, &profile.env, self.cfg.startup_timeout).await?;
+        let (proc, ws_url) = process::spawn(
+            &executable,
+            &args,
+            &profile.env,
+            self.cfg.startup_timeout,
+            |pid| record.set_browser(pid),
+        )
+        .await?;
 
+        let limits = self.cdp_limits();
         let connected = async {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let limits = CdpLimits {
-                command_timeout: remaining.max(Duration::from_secs(1)),
-                ..CdpLimits::default()
-            };
-            let cdp = CdpClient::connect(&ws_url, limits).await?;
+            let cdp = CdpClient::connect(&ws_url, limits.clone()).await?;
             let version = match cdp.call("Browser.getVersion", json!({}), None).await {
                 Ok(reply) => reply
                     .get("product")
@@ -180,10 +229,11 @@ impl BrowserRuntime for ChromiumRuntime {
         tracing::info!(browser = %request.browser_id, pid = proc.pid(), %version, "browser launched");
         Ok(Box::new(ChromiumHandle {
             id: request.browser_id,
-            ws_url,
+            ws_url: ws_url.clone(),
             version,
             proc,
-            cdp,
+            control: Control::new(ws_url, limits, cdp),
+            record,
             temp: Mutex::new(temp),
             shutdown_done: tokio::sync::Mutex::new(false),
         }))
@@ -208,7 +258,9 @@ struct ChromiumHandle {
     ws_url: String,
     version: String,
     proc: Proc,
-    cdp: CdpClient,
+    control: Control,
+    /// Removed once the browser is gone (or the handle is dropped).
+    record: RecordGuard,
     temp: Mutex<Option<TempDir>>,
     shutdown_done: tokio::sync::Mutex<bool>,
 }
@@ -259,17 +311,15 @@ impl BrowserHandle for ChromiumHandle {
         if let Some(exit) = self.proc.exited() {
             return RuntimeHealth::Exited { detail: exit.0 };
         }
-        if self.cdp.is_closed() {
-            return RuntimeHealth::Unresponsive {
-                detail: "DevTools connection is closed".into(),
-            };
-        }
-        match tokio::time::timeout(
-            HEALTH_TIMEOUT,
-            self.cdp.call("Browser.getVersion", json!({}), None),
-        )
-        .await
-        {
+        // A closed control connection (an oversized reply, a transport error) is
+        // repaired here rather than counted against a browser that still runs.
+        let probe = async {
+            let cdp = self.control.client().await?;
+            cdp.call("Browser.getVersion", json!({}), None)
+                .await
+                .map_err(Error::from)
+        };
+        match tokio::time::timeout(HEALTH_TIMEOUT, probe).await {
             Ok(Ok(_)) => RuntimeHealth::Healthy,
             Ok(Err(err)) => RuntimeHealth::Unresponsive {
                 detail: err.to_string(),
@@ -282,7 +332,9 @@ impl BrowserHandle for ChromiumHandle {
 
     async fn create_context(&self) -> Result<ContextId> {
         let reply = self
-            .cdp
+            .control
+            .client()
+            .await?
             .call(
                 "Target.createBrowserContext",
                 json!({ "disposeOnDetach": false }),
@@ -297,7 +349,9 @@ impl BrowserHandle for ChromiumHandle {
     }
 
     async fn dispose_context(&self, context: &ContextId) -> Result<()> {
-        self.cdp
+        self.control
+            .client()
+            .await?
             .call(
                 "Target.disposeBrowserContext",
                 json!({ "browserContextId": context.0 }),
@@ -308,7 +362,7 @@ impl BrowserHandle for ChromiumHandle {
     }
 
     async fn capture_state(&self, context: Option<&ContextId>) -> Result<StateSnapshot> {
-        state::capture(&self.cdp, &self.version, context).await
+        state::capture(&self.control, &self.version, context).await
     }
 
     async fn restore_state(
@@ -316,7 +370,7 @@ impl BrowserHandle for ChromiumHandle {
         context: Option<&ContextId>,
         snapshot: &StateSnapshot,
     ) -> Result<()> {
-        state::restore(&self.cdp, context, snapshot).await
+        state::restore(&self.control, context, snapshot).await
     }
 
     async fn shutdown_confirmed(&self) -> Result<()> {
@@ -327,17 +381,22 @@ impl BrowserHandle for ChromiumHandle {
         if self.proc.exited().is_none() {
             // Polite first: the browser flushes profile data on `Browser.close`.
             // Its error is irrelevant; the exit wait below is the confirmation.
-            let _ = tokio::time::timeout(
-                BROWSER_CLOSE_ACK,
-                self.cdp.call("Browser.close", json!({}), None),
-            )
-            .await;
+            let close = async {
+                self.control
+                    .client()
+                    .await?
+                    .call("Browser.close", json!({}), None)
+                    .await
+                    .map_err(Error::from)
+            };
+            let _ = tokio::time::timeout(BROWSER_CLOSE_ACK, close).await;
             if !self.proc.wait_exit(BROWSER_CLOSE_EXIT).await {
                 self.proc.terminate().await?;
             }
         }
-        self.cdp.close().await;
+        self.control.close().await;
         self.remove_temp_dir().await;
+        self.record.remove();
         *done = true;
         tracing::info!(browser = %self.id, "browser shut down");
         Ok(())
@@ -348,7 +407,7 @@ impl BrowserHandle for ChromiumHandle {
 mod tests {
     use std::path::Path;
 
-    use super::build_args;
+    use super::{WEBRTC_FLAG, build_args};
     use crate::config::LaunchProfile;
 
     #[test]
@@ -360,5 +419,19 @@ mod tests {
         let args = build_args(&profile, Path::new("dir"), None, "42");
         assert!(args.iter().any(|a| a == "--fingerprint=42"));
         assert!(!args.iter().any(|a| a.contains("{persona_seed}")));
+    }
+
+    #[test]
+    fn proxied_launch_forces_webrtc_through_the_proxy() {
+        let profile = LaunchProfile::default();
+        let proxied = build_args(&profile, Path::new("dir"), Some("http://127.0.0.1:1"), "1");
+        assert!(proxied.iter().any(|a| a == WEBRTC_FLAG), "{proxied:?}");
+        assert!(
+            proxied
+                .iter()
+                .any(|a| a == "--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+        );
+        let direct = build_args(&profile, Path::new("dir"), None, "1");
+        assert!(!direct.iter().any(|a| a.contains("webrtc")));
     }
 }
