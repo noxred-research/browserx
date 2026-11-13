@@ -104,8 +104,10 @@ One TOML file with `deny_unknown_fields`. Relative paths resolve against the fil
 | `[sessions] max_tracked` | `4` | Sessions this server controls at once (1 to 64) |
 | `[sessions] default_ttl_secs`, `max_ttl_secs` | `900`, `3600` | Lease TTL when the model names none, and the most it may ask for |
 | `[audit] path` | required | The audit log |
+| `[analytics]`, `[events]`, `[search]` | off | Copies of the audit log sent to ClickHouse, Kafka or RabbitMQ, OpenSearch or Elasticsearch: see [Audit export](#audit-export) |
 | `[limits] sample_interval_secs` | `15` | Background metrics sampling, for rates |
 | `[limits.per_minute] <tool>` | by class | Calls per minute for one tool |
+| `[cache] url`, `key_prefix`, `db`, `username`, `password_file`, `tls_ca_file`, `connect_timeout_ms`, `command_timeout_ms`, `allow_plaintext`, `required` | none; `browserx:`; server default; none; none; none; `2000`; `500`; `false`; `false` | [Valkey or Redis](#shared-limits-valkey-or-redis) for limits shared by several servers |
 | `[ai] base_url`, `model`, `api_key_file`, `timeout_secs`, `max_tokens`, `max_input_chars` | none; `60`; `1024`; `24000` | The optional chat-completions endpoint |
 | `[proxy_routes.<name>] url`, `username`, `password_file` | none | A named upstream proxy a model may choose; credentials stay here |
 | `[[adopt]] session_id`, `token_file` | none | An existing session this server may browse; the file holds its controller token |
@@ -126,7 +128,7 @@ A tool whose capability is not enabled is **not listed**, and calling it is a pr
 
 | Tool | What it returns |
 | --- | --- |
-| `capabilities` | What the operator enabled: capabilities, the tool names, browsing scope and engagement window, proxy route names, whether a model is configured, the sessions this server controls. Agents should call it first |
+| `capabilities` | What the operator enabled: capabilities, the tool names, browsing scope and engagement window, proxy route names, whether a model is configured, the sessions this server controls, and `export`, the counters of each audit export sink (`sink`, `sent`, `dropped`, `queued`, `last_error`, `state`). Agents should call it first |
 | `health` | The API (reachable, key accepted, latency) and the operations listener (`/healthz`, `/readyz` with the reasons it gives) |
 | `pool_status` | Sessions by status, browsers by isolation, queue depth, relay connections, admissions, recoveries, snapshots and egress refusals over `window_secs` (default 300), and a verdict `ok`, `saturated` or `degraded` with reasons |
 | `assess` | Graded checks `pass`, `warn`, `fail` with evidence and remediation: `readiness`, `queue_saturation`, `recovery_rate`, `lost_sessions`, `snapshot_failures`, `egress_refusals`. Missing metrics are reported as `warn`, never as healthy |
@@ -545,6 +547,54 @@ browserx mcp audit verify mcp-audit.jsonl
 
 `verify` recomputes every hash and exits non-zero at the first entry that was edited, removed or reordered, naming its line. Cutting entries off the end keeps a valid chain, so **store the printed last hash outside the host** (or set `chattr +a` on the file). To rotate, stop the server, move the file away and start again: the new file begins a new chain.
 
+## Audit export
+
+The hash-chained file stays the authoritative record. Each of the sinks below receives a **copy** of every entry after it was written to the file, with all fields including `seq` and `hash`, so a receiver can recompute the chain (the hash input is described under [Audit log](#audit-log)) and discard duplicates by `(seq, hash)`. Export never fails or slows a call: every sink has its own bounded in-memory queue (`buffer`, default `10000` records) and a background task that sends batches (`batch_size`, `flush_interval_ms`) with bounded timeouts (`request_timeout_ms`). A failed batch is sent again up to 3 times with exponential back-off, then dropped. A record that does not fit into a full queue is dropped at once. Drops are counted per sink and shown in `capabilities` as `export: [{sink, sent, dropped, queued, last_error, state}]`; `last_error` never contains a secret. Delivery is **at-least-once**: after a lost acknowledgement a batch is sent again. The local file is the source for catching up after a drop. On shutdown the queues are flushed once (at most 5 seconds).
+
+At startup the server contacts each sink once (at most 10 seconds). A sink that cannot be used, because the server is the wrong engine or too old, or because its schema is newer than this build, stops the start with a clear error. A sink that is only unreachable is logged and retried in the background.
+
+Secrets are never part of a URL (a URL with a password is refused at load). Passwords and keys come from a file (`password_file`, `api_key_file`; mode `0600` is advised) or from the environment variable named below. Plain `http`, `amqp` or a plain Kafka connection to a host that is not loopback is refused unless `allow_plaintext = true`; `tls_ca_file` adds root certificates (PEM) to the system roots. Every key not listed here is refused, as is a combination that would be ignored (for example `tls_ca_file` with a plain URL).
+
+All sinks work only inside their own namespace, so several MCP servers and other products can share one instance: a ClickHouse database, a Kafka topic prefix, a RabbitMQ virtual host plus exchange prefix, an OpenSearch/Elasticsearch index prefix. Nothing outside it is read, changed or deleted.
+
+| Section | Keys (defaults) |
+| --- | --- |
+| `[analytics]` ClickHouse over HTTP | `url`; `database` (`browserx`); `user` (`default`); `password_file`, else `BROWSERX_ANALYTICS_PASSWORD`; `batch_size` (`500`, at most 10000); `flush_interval_ms` (`1000`); `buffer` (`10000`); `request_timeout_ms` (`5000`); `tls_ca_file`; `allow_plaintext` |
+| `[events]` `kind = "kafka"` | `brokers = ["host:9092"]`; `topic_prefix` (`browserx.`; the topic is `<prefix>audit`); `client_id` (`browserx-mcp`); `tls`, `tls_ca_file`; `[events.sasl]` `mechanism` (`plain`, `scram-sha-256`, `scram-sha-512`), `username`, `password_file` or `BROWSERX_EVENTS_PASSWORD`; `allow_plaintext`; batching keys as above |
+| `[events]` `kind = "amqp"` | `url` (`amqp://host[:port]` or `amqps://`, no credentials, no path); `username`; `password_file` or `BROWSERX_EVENTS_PASSWORD`; `vhost` (`/`); `exchange_prefix` (`browserx.`; the exchange is `<prefix>audit`); `tls_ca_file`; `allow_plaintext`; `batch_size` (`200`, at most 1000: the unconfirmed messages in flight) and the other batching keys |
+| `[events]` `kind = "none"` | no other key |
+| `[search]` | `kind` (`opensearch` or `elasticsearch`); `url`; `index_prefix` (`browserx-`); `username` with `password_file` or `BROWSERX_SEARCH_PASSWORD`, or `api_key_file` (Elasticsearch only); `tls_ca_file`; `allow_plaintext`; batching keys as above |
+
+```toml
+[analytics]
+url = "https://clickhouse.internal:8443"
+database = "browserx"
+user = "browserx"
+password_file = "/etc/browserx/clickhouse.pw"
+
+[events]
+kind = "kafka"
+brokers = ["kafka-1.internal:9093"]
+tls = true
+[events.sasl]
+username = "browserx"
+password_file = "/etc/browserx/kafka.pw"
+
+[search]
+kind = "opensearch"
+url = "https://search.internal:9200"
+username = "browserx"
+password_file = "/etc/browserx/search.pw"
+```
+
+**ClickHouse.** The sink creates the database if it is missing and applies versioned migrations (table `schema_migrations`); a database with a newer schema than this build is refused. Rows go into `audit_v1` (MergeTree, `ORDER BY (engagement, ts, seq)`) with typed columns `seq`, `ts`, `prev`, `hash`, `phase`, `tool`, `outcome`, `detail`, `duration_ms`, the extracted `engagement`, `operator`, `reason`, `action_class` and `trace_id`, the JSON text of `caller`, `context` and `arguments`, and `raw`, the entry exactly as written to the file, which is what a chain check needs. ClickHouse keeps duplicates from retries: query with `GROUP BY seq, hash` or `LIMIT 1 BY seq, hash`.
+
+**Kafka.** The topic `<topic_prefix>audit` must already exist; BrowserX never creates, alters or deletes topics, and says `the topic ... does not exist` in `last_error` until it does. Messages are produced with all in-sync replicas acknowledging (`acks=all`), to the partition the key hashes to; the key is the engagement id (the tool name when the entry has none), so one engagement stays ordered. The client has no idempotent producer, so a batch whose acknowledgement is lost is sent again: consumers deduplicate by `(seq, hash)`, which are also in the headers `audit-seq` and `audit-hash`.
+
+**RabbitMQ.** The sink declares the durable `topic` exchange `<exchange_prefix>audit` in the configured virtual host and publishes with publisher confirms; the routing key is the tool name (characters other than letters, digits, `_` and `-` become `_`) and the message id is the entry's hash. It declares no queue and deletes nothing: consumers bind their own queues. A lost connection is rebuilt with back-off.
+
+**OpenSearch and Elasticsearch.** The sink asks the server which engine and version it is and refuses a server that is not the configured `kind`, OpenSearch before 2.0 or Elasticsearch before 7.10. It uses only the shared REST subset: a composable index template `<index_prefix>audit`, the index `<index_prefix>audit-v1` behind the write alias `<index_prefix>audit` (its mapping version is kept in the index `_meta`; a newer version is refused) and `_bulk`. Documents are indexed with the entry's hash as `_id`, so a duplicate replaces itself. Failed bulk items are retried only for status 429 and 5xx. Mapping: `keyword` for `tool`, `outcome`, `phase`, `engagement`, `operator`, `reason`, `action_class`, `trace_id`, `prev` and `hash`; `date` for `ts`; `long` for `seq` and `duration_ms`; `text` for `detail` and `arguments_text` (the arguments as `path=value` lines); `caller`, `context` and `arguments` are kept in the document but not indexed.
+
 ## Evaluating the gate
 
 `browserx agent eval --suite <path> --report <path> --seed <n>` runs a versioned adversarial suite against the enforcement layers (scope, grant, ledger, classifier, stale references, redaction) with a real Chromium and an offline fixture server on the loopback interface, and writes a JSON report with a matrix of attempted, blocked and escaped attempts per layer. It exits `0` only when no deterministic layer let an attempt escape and every case passed, and `2` when Chromium is missing, so a CI lane cannot pass without a browser. `--seed` fixes the order of the cases. See the [CLI reference](cli.md#browserx-agent-eval); a build with the `fault-injection` feature adds `--mutate <layer>` to prove that the suite notices a layer that was switched off.
@@ -594,10 +644,33 @@ A refusal is final: the agent is told not to look for a way around it, and none 
 | HTTP 400 with code `-32020` or `-32022` | A `2026-07-28` request whose `MCP-Protocol-Version`, `Mcp-Method` or `Mcp-Name` header disagrees with the body, or a protocol version the server does not serve (`error.data.supported` lists them) |
 | The audit log refuses writes | Calls that change something are refused when the log cannot be written; check the path's permissions and space |
 
+## Shared limits (Valkey or Redis)
+
+One MCP server keeps its per-tool limits and its engagement budgets in memory. Several servers in front of one worker would each allow the full limit. With a `[cache]` section they count in one Valkey or Redis instance instead:
+
+```toml
+[cache]
+url = "rediss://cache.internal:6380"      # redis:// is accepted only for loopback, or with allow_plaintext = true
+key_prefix = "browserx:"                   # 1..=64 of [A-Za-z0-9:_.-], ends in ':'
+# db = 2                                   # 0..=15
+# username = "browserx"                    # an ACL user
+# password_file = "./cache.pw"             # or the environment variable BROWSERX_CACHE_PASSWORD
+# tls_ca_file = "./cache-ca.pem"           # rediss:// only; default: system and bundled roots
+# connect_timeout_ms = 2000
+# command_timeout_ms = 500
+# required = false                         # true: refuse to start when the cache does not answer
+```
+
+- A URL that carries a user, a password, a path or a query is refused at load. Unknown keys are refused.
+- Per tool and per minute (`[limits.per_minute]` and the class defaults): a sliding window in the sorted set `<prefix>rl:<tool>`, checked and updated by one Lua script that reads the cache server's clock, so servers with different clocks agree.
+- Engagement budgets of a signed manifest (`limits.max_calls`, `limits.rps`): the counter `<prefix>eng:<engagement id>:calls` and a one-second window `<prefix>eng:<engagement id>:rps`, so several servers share one budget.
+- Keys expire (windows after two minutes, the call counter after 30 days of no calls). BrowserX never runs `FLUSHALL`, `FLUSHDB` or `KEYS`; the only scan is `SCAN MATCH <prefix>*`. Give each product or environment its own prefix (or database, or ACL user) and the instance can be shared.
+- **When the cache is down** the server falls back to its in-memory limits, never to no limit: a call the cache admitted is also recorded in memory, so the fallback continues from what this server has seen. `capabilities` reports `cache: {configured, healthy, degraded, key_prefix, fallback_total}` (no address, no password), the audit entry of a call made while degraded carries `cache_degraded: true`, and the transition is logged once. One call per second probes the cache again, and the first success clears the state. Without `required = true` the server also starts degraded when the cache is unreachable at startup.
+
 ## Limits
 
 - The snapshot, interaction and text extraction cover the main frame. Coordinates for clicks are those of the main frame's viewport.
 - `page_text` and the wait and select helpers run fixed scripts in the page's own JavaScript world; a hostile page can tamper with what they return, which is why the result is untrusted.
 - Tokens are held in memory only. A restart of the server forgets them, and so it forgets ledger handles, plan progress and pending multi round-trip approvals.
 - Request interception is a feature of the relay's protocol surface; if it is unavailable the server logs a warning and enforces scope after navigation only.
-- Per-tool limits and budgets bound a single server process; running several processes against one worker multiplies them.
+- Per-tool limits and budgets bound a single server process unless `[cache]` is configured; without it, running several processes against one worker multiplies them.

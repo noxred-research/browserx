@@ -12,6 +12,8 @@ use tokio_util::sync::CancellationToken;
 use crate::approvals::Approvals;
 use crate::audit::{Audit, Context as AuditContext};
 use crate::backend::Backend;
+use crate::backends::cache::{Admission, Cache};
+use crate::backends::export::Exporter;
 use crate::browse::{Hub, Limits};
 use crate::config::{Capability, Config, read_secret};
 use crate::crypto::OperatorKeys;
@@ -27,6 +29,11 @@ use crate::sessions::{Managed, Registry};
 use crate::shots::Shots;
 use crate::tools::catalog::{self, ToolDef};
 
+/// How long startup waits for the export sinks to answer once.
+const EXPORT_PREFLIGHT: Duration = Duration::from_secs(10);
+/// How long shutdown waits for the export queues to flush.
+const EXPORT_FLUSH: Duration = Duration::from_secs(5);
+
 /// Everything the tools need. Built once from the configuration.
 pub struct Ctx {
     /// The configuration.
@@ -39,8 +46,10 @@ pub struct Ctx {
     pub scope: Arc<Scope>,
     /// Secret scrubbing for output and prompts.
     pub redactor: Redactor,
-    /// Per-tool rate limits.
+    /// Per-tool rate limits in memory: the only limiter without a cache, the fallback with one.
     pub limiter: RateLimiter,
+    /// Limits and budgets shared with other servers, when `[cache]` is configured.
+    pub cache: Option<Arc<Cache>>,
     /// Controlled sessions.
     pub registry: Registry,
     /// Browser connections.
@@ -183,6 +192,11 @@ impl Ctx {
             });
         }
 
+        let cache = cfg
+            .cache
+            .as_ref()
+            .map(|section| Cache::new(section).map(Arc::new))
+            .transpose()?;
         let redactor = Redactor::new(secrets);
         let keys = cfg
             .operator
@@ -211,6 +225,7 @@ impl Ctx {
             }
             _ => None,
         };
+        let exporter = Exporter::from_config(&cfg)?;
         let audit = Audit::open(
             &cfg.audit.path,
             AuditContext {
@@ -234,6 +249,10 @@ impl Ctx {
                 e,
             )
         })?;
+        let audit = match exporter {
+            Some(exporter) => audit.with_exporter(exporter),
+            None => audit,
+        };
 
         let mut scope = Scope::new(cfg.origins()?, cfg.browse.require_scope, cfg.window()?);
         if let Some(loaded) = &loaded_manifest {
@@ -258,6 +277,7 @@ impl Ctx {
             scope,
             redactor,
             limiter: RateLimiter::new(),
+            cache,
             registry,
             hub,
             llm,
@@ -274,8 +294,52 @@ impl Ctx {
         }))
     }
 
-    /// Starts the background metrics sampler.
+    /// Checks the shared cache once at startup. A cache that does not answer leaves the server
+    /// running on its in-memory limits (`degraded`), unless `cache.required` is set.
+    ///
+    /// # Errors
+    /// [`McpError::Cache`] when the cache is required and does not answer.
+    pub async fn check_cache(&self) -> Result<(), McpError> {
+        let (Some(cache), Some(section)) = (&self.cache, &self.cfg.cache) else {
+            return Ok(());
+        };
+        match cache.probe().await {
+            Ok(()) => Ok(()),
+            Err(error) if section.required => Err(McpError::Cache(format!(
+                "cache.required is set and the cache cannot be used: {error}"
+            ))),
+            Err(error) => {
+                tracing::warn!(%error, "the shared cache is not available at startup: the in-memory limits apply");
+                Ok(())
+            }
+        }
+    }
+
+    /// Admits a call of `tool` against `per_minute`: in the shared cache when one answers, else
+    /// in memory. A call the cache admitted is also recorded in memory, so the fallback
+    /// continues from what this server has seen. The result is the wait in seconds on refusal.
+    ///
+    /// # Errors
+    /// The seconds after which the call would be admitted.
+    pub async fn admit(&self, tool: &str, per_minute: u32) -> Result<(), u64> {
+        if let Some(cache) = &self.cache {
+            match cache.rate_limit(tool, per_minute).await {
+                Ok(Admission::Admitted) => {
+                    self.limiter.note(tool);
+                    return Ok(());
+                }
+                Ok(Admission::Wait(seconds)) => return Err(seconds),
+                Err(_) => {}
+            }
+        }
+        self.limiter.admit(tool, per_minute)
+    }
+
+    /// Starts the background metrics sampler and the audit export tasks.
     pub fn start(self: &Arc<Self>) {
+        if let Some(exporter) = self.audit.exporter() {
+            exporter.start();
+        }
         if self.backend.has_ops() {
             Arc::clone(&self.sampler).spawn(
                 Duration::from_secs(self.cfg.limits.sample_interval_secs),
@@ -314,14 +378,32 @@ impl Ctx {
         OffsetDateTime::now_utc()
     }
 
-    /// Stops background tasks, closes browser connections and, when configured, releases the
-    /// sessions this server created.
+    /// Waits until every audit export sink has tried to reach its service once.
+    ///
+    /// # Errors
+    /// When a sink refuses to run (wrong engine or version, a schema newer than this build).
+    /// A sink that is merely unreachable is logged and keeps retrying.
+    pub async fn preflight_export(&self) -> Result<(), McpError> {
+        match self.audit.exporter() {
+            Some(exporter) => exporter.preflight(EXPORT_PREFLIGHT).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Stops background tasks, closes browser connections, when configured releases the
+    /// sessions this server created, and flushes the audit export.
     pub async fn shutdown(&self) {
         self.cancel.cancel();
         self.hub.close_all().await;
-        if !self.cfg.mcp.release_on_exit {
-            return;
+        if self.cfg.mcp.release_on_exit {
+            self.release_created().await;
         }
+        if let Some(exporter) = self.audit.exporter() {
+            exporter.shutdown(EXPORT_FLUSH).await;
+        }
+    }
+
+    async fn release_created(&self) {
         for managed in self.registry.created() {
             let outcome = self
                 .backend

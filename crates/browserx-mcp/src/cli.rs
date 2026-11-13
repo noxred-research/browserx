@@ -594,7 +594,12 @@ pub async fn run(
     let serve_stdio = options.is_none() || args.stdio;
 
     let ctx = Ctx::build(config)?;
+    ctx.check_cache().await?;
     ctx.start();
+    if let Err(error) = ctx.preflight_export().await {
+        ctx.shutdown().await;
+        return Err(error);
+    }
     let server = Arc::new(Server::new(Arc::clone(&ctx)));
     let stop = CancellationToken::new();
 

@@ -16,10 +16,12 @@ use serde_json::{Map, Value, json};
 
 use crate::approvals::Approved;
 use crate::audit::{Caller, Entry, Phase};
+use crate::backends::cache::EngagementAdmission;
 use crate::ctx::Ctx;
 use crate::error::{FailKind, ToolError, ToolResult};
 pub use crate::gate::Call;
 use crate::ledger::Flag;
+use crate::manifest::Limits;
 use crate::safety::{new_nonce, per_minute, wrap_untrusted};
 use crate::schema;
 use catalog::Class;
@@ -266,7 +268,7 @@ pub fn unix_now() -> i64 {
 }
 
 /// Checks the grant's tool list and budgets and the manifest's limits before a tool runs.
-fn precheck(ctx: &Ctx, call: &Call<'_>, def: &ToolDef) -> Result<(), ToolError> {
+async fn precheck(ctx: &Ctx, call: &Call<'_>, def: &ToolDef) -> Result<(), ToolError> {
     let page_tool =
         !matches!(def.class, Class::Monitor | Class::Engagement | Class::Ai) || def.scoped;
     if !page_tool {
@@ -306,38 +308,73 @@ fn precheck(ctx: &Ctx, call: &Call<'_>, def: &ToolDef) -> Result<(), ToolError> 
         }
     }
     if let Some(loaded) = ctx.scope.manifest().filter(|m| m.trusted()) {
-        let limits = loaded.manifest.limits;
-        if let Some(rps) = limits.rps {
-            let now = Instant::now();
-            let mut recent = ctx
-                .engagement_recent
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            while recent
-                .front()
-                .is_some_and(|at| now.duration_since(*at) >= std::time::Duration::from_secs(1))
-            {
-                recent.pop_front();
+        engagement_limits(ctx, &loaded.manifest.id, loaded.manifest.limits).await?;
+    }
+    Ok(())
+}
+
+fn rate_exceeded(rps: u32) -> ToolError {
+    ToolError::new(
+        FailKind::RateLimited,
+        format!("the engagement allows {rps} calls per second; retry in a moment"),
+    )
+}
+
+fn budget_exhausted(max: u64) -> ToolError {
+    ToolError::refused_with(
+        "budget_exhausted",
+        format!("the engagement allows {max} calls and they are used up"),
+    )
+}
+
+/// Counts a call against the engagement limits: in the shared cache when one answers, else in
+/// memory. A call the cache admitted is also recorded in memory, so the fallback continues from
+/// what this server has seen and never starts from zero.
+async fn engagement_limits(ctx: &Ctx, id: &str, limits: Limits) -> Result<(), ToolError> {
+    if limits.rps.is_none() && limits.max_calls.is_none() {
+        return Ok(());
+    }
+    if let Some(cache) = &ctx.cache {
+        match cache.engagement(id, limits).await {
+            Ok(EngagementAdmission::Admitted) => return engagement_local(ctx, limits, false),
+            Ok(EngagementAdmission::RateExceeded) => {
+                return Err(rate_exceeded(limits.rps.unwrap_or_default()));
             }
-            if recent.len() >= usize::try_from(rps).unwrap_or(usize::MAX) {
-                return Err(ToolError::new(
-                    FailKind::RateLimited,
-                    format!("the engagement allows {rps} calls per second; retry in a moment"),
-                ));
+            Ok(EngagementAdmission::BudgetExhausted { .. }) => {
+                return Err(budget_exhausted(limits.max_calls.unwrap_or_default()));
             }
-            recent.push_back(now);
+            Err(_) => {}
         }
-        if let Some(max) = limits.max_calls {
-            let used = ctx
-                .engagement_calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                .saturating_add(1);
-            if used > max {
-                return Err(ToolError::refused_with(
-                    "budget_exhausted",
-                    format!("the engagement allows {max} calls and they are used up"),
-                ));
-            }
+    }
+    engagement_local(ctx, limits, true)
+}
+
+/// The in-memory engagement limits. With `enforce` false the call is only recorded.
+fn engagement_local(ctx: &Ctx, limits: Limits, enforce: bool) -> Result<(), ToolError> {
+    if let Some(rps) = limits.rps {
+        let now = Instant::now();
+        let mut recent = ctx
+            .engagement_recent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while recent
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= std::time::Duration::from_secs(1))
+        {
+            recent.pop_front();
+        }
+        if enforce && recent.len() >= usize::try_from(rps).unwrap_or(usize::MAX) {
+            return Err(rate_exceeded(rps));
+        }
+        recent.push_back(now);
+    }
+    if let Some(max) = limits.max_calls {
+        let used = ctx
+            .engagement_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        if enforce && used > max {
+            return Err(budget_exhausted(max));
         }
     }
     Ok(())
@@ -355,6 +392,9 @@ fn audit_extra(ctx: &Ctx, call: &Call<'_>, info: &CallInfo<'_>) -> Value {
         && let Some(plan) = grant.grant.plan_digest()
     {
         extra.insert("plan_digest".into(), json!(plan));
+    }
+    if ctx.cache.as_ref().is_some_and(|cache| cache.degraded()) {
+        extra.insert("cache_degraded".into(), json!(true));
     }
     if let Some(loaded) = ctx.scope.manifest() {
         extra.insert(
@@ -442,7 +482,7 @@ pub async fn call(
         def.name,
         def.class.default_per_minute(),
     );
-    if let Err(wait) = ctx.limiter.admit(def.name, limit) {
+    if let Err(wait) = ctx.admit(def.name, limit).await {
         return finish(Err(ToolError::new(
             FailKind::RateLimited,
             format!(
@@ -461,7 +501,7 @@ pub async fn call(
     {
         return finish(Err(refusal.into()));
     }
-    if let Err(error) = precheck(ctx, &state, def) {
+    if let Err(error) = precheck(ctx, &state, def).await {
         return finish(Err(error));
     }
     if def.confirm && args.bool("confirm") != Some(true) {

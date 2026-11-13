@@ -537,15 +537,29 @@ impl RateLimiter {
         self.admit_at(tool, per_minute, Instant::now())
     }
 
-    fn admit_at(&self, tool: &str, per_minute: u32, now: Instant) -> Result<(), u64> {
+    /// Records a call of `tool` that a shared limiter already admitted, so the in-memory window
+    /// is current if the shared limiter stops answering. It never refuses.
+    pub fn note(&self, tool: &str) {
+        let now = Instant::now();
         let mut map = self.window.lock().unwrap_or_else(PoisonError::into_inner);
         let calls = map.entry(tool.to_owned()).or_default();
+        Self::expire(calls, now);
+        calls.push_back(now);
+    }
+
+    fn expire(calls: &mut VecDeque<Instant>, now: Instant) {
         while calls
             .front()
             .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
         {
             calls.pop_front();
         }
+    }
+
+    fn admit_at(&self, tool: &str, per_minute: u32, now: Instant) -> Result<(), u64> {
+        let mut map = self.window.lock().unwrap_or_else(PoisonError::into_inner);
+        let calls = map.entry(tool.to_owned()).or_default();
+        Self::expire(calls, now);
         if calls.len() >= per_minute as usize {
             let wait = calls.front().map_or(60, |at| {
                 60u64.saturating_sub(now.duration_since(*at).as_secs())

@@ -110,3 +110,25 @@ headless = true
 args = []
 # executable = "/usr/bin/chromium"
 # env = { LANG = "C.UTF-8" }
+
+# Optional: keep leases in PostgreSQL or MariaDB instead of the SQLite file in state_dir. Every
+# worker sharing a database needs its own `node`. Passwords come from a file or from
+# BROWSERX_DATABASE_PASSWORD, never from the URL. See docs/guides/backends.md.
+# [database]
+# url = "postgres://browserx@db.example.test:5432/platform"   # or mysql:// for MariaDB
+# schema = "browserx"
+# node = "worker-1"
+# password_file = "/etc/browserx/db.password"
+# tls = "require"
+
+# Optional: keep sealed snapshots in an S3-compatible object store instead of state_dir/snapshots.
+# Credentials come from a file (access_key_id, secret_access_key) or from
+# BROWSERX_OBJECT_STORE_ACCESS_KEY_ID and BROWSERX_OBJECT_STORE_SECRET_ACCESS_KEY.
+# [object_store]
+# profile = "self-hosted"          # standard | edge | self-hosted | compatible
+# endpoint = "https://objects.example.test:9000"
+# region = "us-east-1"
+# bucket = "platform-state"
+# prefix = "browserx/"
+# path_style = true
+# credentials_file = "/etc/browserx/objects.credentials"

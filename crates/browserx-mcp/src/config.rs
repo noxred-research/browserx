@@ -93,6 +93,18 @@ pub struct Config {
     /// The action safety profile and the Rule-of-Two policy.
     #[serde(default)]
     pub safety: SafetySection,
+    /// Valkey or Redis for limits and budgets shared by several MCP servers.
+    #[serde(default)]
+    pub cache: Option<crate::backends::cache::CacheSection>,
+    /// Export of the audit log to ClickHouse.
+    #[serde(default)]
+    pub analytics: Option<crate::backends::clickhouse::AnalyticsSection>,
+    /// Export of the audit log to Kafka or RabbitMQ.
+    #[serde(default)]
+    pub events: Option<crate::backends::export::EventsSection>,
+    /// Export of the audit log to OpenSearch or Elasticsearch.
+    #[serde(default)]
+    pub search: Option<crate::backends::search::SearchSection>,
 }
 
 /// `[operator]`: the key file for signatures.
@@ -595,6 +607,10 @@ impl Config {
         if let Some(dir) = &mut self.approvals.dir {
             fix(dir);
         }
+        if let Some(cache) = &mut self.cache {
+            cache.resolve_paths(base);
+        }
+        self.resolve_export(base);
     }
 
     /// The directory of out-of-band approvals.
@@ -671,6 +687,9 @@ impl Config {
         if !(4096..=4 * 1024 * 1024).contains(&mcp.max_result_bytes) {
             return Err(bad("mcp.max_result_bytes must be 4096..=4194304"));
         }
+        if let Some(cache) = &self.cache {
+            cache.validate()?;
+        }
         self.validate_capabilities()?;
         self.validate_http()?;
         self.validate_browse()?;
@@ -739,7 +758,7 @@ impl Config {
         if !(30..=3600).contains(&self.approvals.ttl_secs) {
             return Err(bad("approvals.ttl_secs must be 30..=3600"));
         }
-        Ok(())
+        self.validate_export()
     }
 
     fn validate_capabilities(&self) -> Result<(), McpError> {

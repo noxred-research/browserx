@@ -1,5 +1,7 @@
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+pub mod services;
+
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -17,6 +17,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
+use std::sync::Arc;
+
+use crate::backends::export::Exporter;
 use crate::redact::Redactor;
 
 /// The hash of the entry before the first one.
@@ -98,6 +101,7 @@ pub struct Audit {
     path: PathBuf,
     context: Context,
     redactor: Redactor,
+    exporter: Option<Arc<Exporter>>,
 }
 
 impl std::fmt::Debug for Audit {
@@ -209,7 +213,22 @@ impl Audit {
             path: path.to_path_buf(),
             context,
             redactor,
+            exporter: None,
         })
+    }
+
+    /// Copies every record written from now on to the export sinks. Exporting never fails or
+    /// slows a write: the local chain stays authoritative.
+    #[must_use]
+    pub fn with_exporter(mut self, exporter: Arc<Exporter>) -> Self {
+        self.exporter = Some(exporter);
+        self
+    }
+
+    /// The export fan-out, when sinks are configured.
+    #[must_use]
+    pub fn exporter(&self) -> Option<&Arc<Exporter>> {
+        self.exporter.as_ref()
     }
 
     /// Opens an independent handle; dropping it releases the exclusive lock.
@@ -307,6 +326,9 @@ impl Audit {
         bytes.push(b'\n');
         file.write_all(&bytes)?;
         file.flush()?;
+        if let Some(exporter) = &self.exporter {
+            exporter.offer(&line);
+        }
         Ok(seq)
     }
 

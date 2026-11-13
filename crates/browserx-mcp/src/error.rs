@@ -27,6 +27,9 @@ pub enum McpError {
     /// The audit log is broken or could not be written.
     #[error("audit log: {0}")]
     Audit(String),
+    /// The shared cache (`[cache]`) is required and cannot be used.
+    #[error("cache: {0}")]
+    Cache(String),
 }
 
 impl McpError {
