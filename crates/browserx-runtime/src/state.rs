@@ -10,10 +10,22 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 
+use crate::control::Control;
+
 /// Origins captured or replayed per snapshot.
 pub(crate) const MAX_ORIGINS: usize = 64;
 /// Bytes of `localStorage` (keys plus values) per origin.
 pub(crate) const MAX_ORIGIN_BYTES: usize = 5 * 1024 * 1024;
+/// Bytes one capture may add up to (cookies, `localStorage`, page URLs, as the
+/// JSON a sealed snapshot holds). Deliberately below the store's 64 MiB sealed
+/// limit so that a capture which succeeds can always be stored.
+pub(crate) const MAX_CAPTURE_BYTES: usize = 48 * 1024 * 1024;
+/// The store accepts at most 64 MiB of sealed bytes (`browserx_store::MAX_SEALED_BYTES`).
+const _: () = assert!(MAX_CAPTURE_BYTES < 64 * 1024 * 1024);
+/// Fixed JSON overhead assumed per cookie (field names, quotes, flags).
+const COOKIE_OVERHEAD: usize = 160;
+/// Fixed JSON overhead assumed per storage entry (`["k","v"],`).
+const ENTRY_OVERHEAD: usize = 8;
 /// Cookies captured per snapshot.
 const MAX_COOKIES: usize = 20_000;
 /// Pages recorded and reopened per snapshot.
@@ -56,6 +68,41 @@ struct RawCookie {
 fn decode<T: for<'de> Deserialize<'de>>(value: Value, what: &str) -> Result<T> {
     serde_json::from_value(value)
         .map_err(|e| Error::Browser(format!("unexpected {what} reply from the browser: {e}")))
+}
+
+/// Length of `text` once JSON-encoded, without the quotes.
+fn json_len(text: &str) -> usize {
+    text.chars()
+        .map(|c| match c {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            c if (c as u32) < 0x20 => 6,
+            c => c.len_utf8(),
+        })
+        .sum()
+}
+
+/// Running total of what a capture would add to the snapshot.
+struct Budget {
+    used: usize,
+    limit: usize,
+}
+
+impl Budget {
+    fn new(limit: usize) -> Self {
+        Self { used: 0, limit }
+    }
+
+    fn take(&mut self, bytes: usize) -> Result<()> {
+        self.used = self.used.saturating_add(bytes);
+        if self.used > self.limit {
+            return Err(Error::InvalidRequest(format!(
+                "session state is larger than the {} byte snapshot budget; \
+                 clear cookies or storage to make it snapshot-able",
+                self.limit
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn context_param(context: Option<&ContextId>) -> Value {
@@ -106,11 +153,28 @@ async fn page_targets(cdp: &CdpClient, context: Option<&ContextId>) -> Result<Ve
 }
 
 /// Captures cookies, `localStorage` of the open `http(s)` origins, and open page URLs.
+///
+/// `localStorage` is read by the browser itself (`DOMStorage`), for the origin
+/// the browser reports for each page target. Nothing a page can script - an
+/// overridden `JSON.stringify`, a forged `location` - influences which origin an
+/// entry is filed under or what it contains. The total captured size is bounded
+/// by [`MAX_CAPTURE_BYTES`]; exceeding it is an error, not a silent truncation.
 pub(crate) async fn capture(
-    cdp: &CdpClient,
+    control: &Control,
     browser_version: &str,
     context: Option<&ContextId>,
 ) -> Result<StateSnapshot> {
+    capture_with_budget(control, browser_version, context, MAX_CAPTURE_BYTES).await
+}
+
+async fn capture_with_budget(
+    control: &Control,
+    browser_version: &str,
+    context: Option<&ContextId>,
+    limit: usize,
+) -> Result<StateSnapshot> {
+    let mut budget = Budget::new(limit);
+    let cdp = control.client().await?;
     let reply = cdp
         .call("Storage.getCookies", context_param(context), None)
         .await?;
@@ -125,10 +189,17 @@ pub(crate) async fn capture(
             "cookie jar truncated in snapshot"
         );
     }
-    let cookies = raw
-        .into_iter()
-        .take(MAX_COOKIES)
-        .map(|c| CookieRecord {
+    let mut cookies = Vec::new();
+    for c in raw.into_iter().take(MAX_COOKIES) {
+        budget.take(
+            COOKIE_OVERHEAD
+                + json_len(&c.name)
+                + json_len(&c.value)
+                + json_len(&c.domain)
+                + json_len(&c.path)
+                + c.same_site.as_deref().map_or(0, json_len),
+        )?;
+        cookies.push(CookieRecord {
             expires: if c.session {
                 None
             } else {
@@ -141,10 +212,10 @@ pub(crate) async fn capture(
             http_only: c.http_only,
             secure: c.secure,
             same_site: c.same_site,
-        })
-        .collect();
+        });
+    }
 
-    let pages = page_targets(cdp, context).await?;
+    let pages = page_targets(&cdp, context).await?;
     let mut open_urls = Vec::new();
     let mut origins: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     let mut tried: HashSet<String> = HashSet::new();
@@ -153,16 +224,24 @@ pub(crate) async fn capture(
             continue;
         };
         if open_urls.len() < MAX_OPEN_URLS {
+            budget.take(json_len(&page.url) + 3)?;
             open_urls.push(page.url.clone());
         }
-        if origins.len() >= MAX_ORIGINS || !tried.insert(origin) {
+        if origins.len() >= MAX_ORIGINS || !tried.insert(origin.clone()) {
             continue;
         }
-        match read_local_storage(cdp, &page.target_id).await {
-            Ok(Some((found, entries))) => {
-                origins.entry(found).or_insert(entries);
+        match read_local_storage(control, &page.target_id, &origin).await {
+            Ok(entries) if entries.is_empty() => {}
+            Ok(entries) => {
+                let cost = json_len(&origin)
+                    + ENTRY_OVERHEAD
+                    + entries
+                        .iter()
+                        .map(|(k, v)| json_len(k) + json_len(v) + ENTRY_OVERHEAD)
+                        .sum::<usize>();
+                budget.take(cost)?;
+                origins.insert(origin, entries);
             }
-            Ok(None) => {}
             Err(err) => {
                 tracing::warn!(error = %err, "could not read localStorage of a page; skipping its origin");
             }
@@ -183,19 +262,23 @@ pub(crate) async fn capture(
     })
 }
 
-/// Attaches to `target_id` (flattened), reads its origin and `localStorage`, detaches.
+/// Reads `origin`'s `localStorage` through the browser's own `DOMStorage` view,
+/// using the page target only as the route to the right storage partition.
+///
+/// An origin whose storage is over the per-origin limit, or whose reply is too
+/// large for the control connection, is skipped (empty result) with a warning;
+/// the control connection reconnects on its next use.
 async fn read_local_storage(
-    cdp: &CdpClient,
+    control: &Control,
     target_id: &str,
-) -> Result<Option<(String, Vec<(String, String)>)>> {
-    let session = attach(cdp, target_id).await?;
-    let evaluated = cdp
+    origin: &str,
+) -> Result<Vec<(String, String)>> {
+    let cdp = control.client().await?;
+    let session = attach(&cdp, target_id).await?;
+    let read = cdp
         .call(
-            "Runtime.evaluate",
-            json!({
-                "expression": "JSON.stringify([location.origin, Object.entries(localStorage)])",
-                "returnByValue": true,
-            }),
+            "DOMStorage.getDOMStorageItems",
+            json!({ "storageId": { "securityOrigin": origin, "isLocalStorage": true } }),
             Some(&session),
         )
         .await;
@@ -209,24 +292,34 @@ async fn read_local_storage(
     {
         tracing::debug!(error = %err, "detach after capture failed");
     }
-    let reply = evaluated?;
-    if reply.get("exceptionDetails").is_some() {
-        // Opaque origins (sandboxed frames, data: URLs) refuse storage access.
-        return Ok(None);
-    }
-    let Some(text) = reply.pointer("/result/value").and_then(Value::as_str) else {
-        return Ok(None);
+    let reply = match read {
+        Ok(reply) => reply,
+        Err(CdpError::MessageTooLarge { limit }) => {
+            tracing::warn!(
+                limit,
+                "localStorage reply exceeds the control connection limit; origin skipped"
+            );
+            return Ok(Vec::new());
+        }
+        Err(other) => return Err(other.into()),
     };
-    if text.len() > MAX_ORIGIN_BYTES {
+    let entries: Vec<Vec<String>> = decode(
+        reply.get("entries").cloned().unwrap_or(Value::Null),
+        "getDOMStorageItems",
+    )?;
+    let mut out = Vec::with_capacity(entries.len());
+    let mut bytes = 0usize;
+    for entry in entries {
+        let [key, value] = <[String; 2]>::try_from(entry)
+            .map_err(|_| Error::Browser("malformed localStorage entry from the browser".into()))?;
+        bytes += key.len() + value.len();
+        out.push((key, value));
+    }
+    if bytes > MAX_ORIGIN_BYTES {
         tracing::warn!("localStorage of an origin exceeds the per-origin limit; skipped");
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    let (origin, entries): (String, Vec<(String, String)>) = serde_json::from_str(text)
-        .map_err(|e| Error::Browser(format!("unexpected localStorage payload: {e}")))?;
-    let Some(origin) = http_origin(&origin) else {
-        return Ok(None);
-    };
-    Ok(Some((origin, entries)))
+    Ok(out)
 }
 
 async fn attach(cdp: &CdpClient, target_id: &str) -> Result<String> {
@@ -250,7 +343,7 @@ fn storage_bytes(entries: &[(String, String)]) -> usize {
 
 /// Replays `state` into `context` (the default context when `None`).
 pub(crate) async fn restore(
-    cdp: &CdpClient,
+    control: &Control,
     context: Option<&ContextId>,
     state: &StateSnapshot,
 ) -> Result<()> {
@@ -273,6 +366,7 @@ pub(crate) async fn restore(
         }
     }
 
+    let cdp = &control.client().await?;
     set_cookies(cdp, context, &state.cookies).await?;
 
     for origin in state.origins.iter().filter(|o| !o.local_storage.is_empty()) {
@@ -503,6 +597,35 @@ mod tests {
         assert_eq!(http_origin("file:///etc/passwd"), None);
         assert_eq!(http_origin("about:blank"), None);
         assert_eq!(http_origin("not a url"), None);
+    }
+
+    #[test]
+    fn json_len_matches_the_real_encoding() {
+        for text in [
+            "plain",
+            "quo\"te and back\\slash",
+            "ctl\u{0}\u{1f}\n\r\t\u{8}\u{c}",
+            "unicode \u{e9}\u{4e2d}\u{1f600}",
+            "",
+        ] {
+            let encoded = serde_json::to_string(text).unwrap();
+            assert_eq!(json_len(text) + 2, encoded.len(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn budget_counts_up_and_refuses_overflow_with_a_typed_error() {
+        let mut budget = Budget::new(100);
+        budget.take(60).unwrap();
+        budget.take(40).unwrap();
+        match budget.take(1) {
+            Err(Error::InvalidRequest(message)) => {
+                assert!(message.contains("100 byte"), "{message}")
+            }
+            other => panic!("expected a budget error, got {other:?}"),
+        }
+        // saturates instead of overflowing
+        assert!(Budget::new(10).take(usize::MAX).is_err());
     }
 
     #[test]

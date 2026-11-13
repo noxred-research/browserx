@@ -41,7 +41,7 @@ They are separate so that probes and metrics scraping can be reachable by your o
    - *Dedicated isolation:* start a forwarder for the session (always: direct with the destination policy, or through the configured upstream), take the profile lock if the session uses a profile directory, restore the latest snapshot if the session uses snapshots, launch Chromium pointed at the forwarder.
    - *Shared isolation:* pick a warm shared browser that has a free context slot and create a browser context in it.
 4. **Lease.** Insert the lease with generation 1, status `idle` and the SHA-256 digest of a fresh token. Only the digest is stored; the token goes back to the caller once.
-5. **Attach.** The client opens the `cdp_url`. The relay checks the token digest and the lease, then connects the client to the browser (dedicated) or to a scoped view of its context (shared). The first attach after creation reports the `outcome` of how the session got its browser.
+5. **Attach.** The client opens the `cdp_url`. The relay checks the token digest and the lease, then connects the client to the browser (dedicated) or to a scoped view of its context (shared); both pass the host-protection rules (no `file:` navigation, no per-context proxy, confined downloads). The first attach after creation reports the `outcome` of how the session got its browser.
 6. **Operate.** The client renews the lease, takes snapshots, disconnects and reconnects. Background tasks watch the browser, the clock and the snapshot schedule.
 7. **Release.** `DELETE` (or expiry) moves the session through `draining`: final snapshot for snapshot sessions, dispose of the context or confirmed shutdown of the process, release of the profile lock, then `closed`.
 
@@ -50,7 +50,7 @@ They are separate so that probes and metrics scraping can be reachable by your o
 | Task | What it does | Bounded by |
 | --- | --- | --- |
 | Health monitor | Probes every browser with a protocol round trip; after `unresponsive_strikes` consecutive failures or on process exit, starts [recovery](recovery.md) | `health.probe_interval_secs`, `health.probe_timeout_ms` |
-| Reaper | Releases sessions past their time-to-live or absolute lifetime, and sessions that sat without a controller longer than their idle timeout; purges terminal leases after the retention window | `session.*` |
+| Reaper | Releases sessions past their time-to-live or absolute lifetime, and sessions that sat without a controller longer than their idle timeout; finishes leases stranded in `draining` or `recovering`; purges terminal leases after the retention window | `session.*` |
 | Snapshotter | Writes a snapshot of every `snapshot` session each `snapshot_interval_secs`, guarded by the generation so a superseded writer is discarded; prunes to `snapshot_keep` | `session.snapshot_interval_secs`, `session.snapshot_keep` |
 | Warm pool | Keeps `warm_shared_browsers` idle shared browsers ready and retires browsers by age or by number of contexts served once they are empty | `pool.*` |
 
@@ -60,13 +60,13 @@ They are separate so that probes and metrics scraping can be reachable by your o
 | --- | --- | --- |
 | One dedicated browser | That session's in-memory page state | Recovery relaunches it; the next attach reports what was restored |
 | One shared browser | Every context in it | Every session in it recovers independently |
-| The worker process | Every browser it supervised (they die with it) | On start, leases found in non-terminal states are orphaned and are recovered or marked `lost` per their recovery policy; see [startup reconciliation](recovery.md#startup-reconciliation) |
+| The worker process | Browsers it supervised keep running in their own process groups, so the next worker kills the ones it can verify and removes their temporary directories ([orphan sweep](recovery.md#startup-reconciliation)) | On start, leases found in non-terminal states are orphaned and are recovered or marked `lost` per their recovery policy; see [startup reconciliation](recovery.md#startup-reconciliation) |
 | The state directory | Leases, snapshots, profiles | Back it up; see [operations](../guides/operations.md#backups) |
 | A client | Nothing server-side | The lease continues until it expires; another client can attach with the token |
 
 ## Bounds
 
-Everything that can grow has a limit: the admission queue (`queue_capacity`), concurrent browsers (`max_browsers`), contexts per shared browser, sessions per owner, CDP message size (64 MiB), pending CDP commands and buffered events, forwarder header size and connection count, labels per session and snapshot size per origin. [Configuration](../guides/configuration.md) lists the ones you can change.
+Everything that can grow has a limit: the admission queue (`queue_capacity`), concurrent browsers (`max_browsers`), contexts per shared browser, sessions per owner, CDP message size (64 MiB dedicated, 16 MiB shared by default), relay connections per session, listener connections and request-head time, pending CDP commands and buffered events, forwarder header size and connection count, labels per session and snapshot size per origin. [Configuration](../guides/configuration.md) lists the ones you can change.
 
 ## Concurrency model
 

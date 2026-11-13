@@ -46,6 +46,32 @@ impl Drop for Admitted {
     }
 }
 
+/// A profile claim that is given back when dropped, however the holder ends.
+pub(crate) struct ProfileClaim {
+    inner: Arc<Inner>,
+    profile: ProfileId,
+    holder: SessionId,
+}
+
+impl ProfileClaim {
+    /// Claims `profile` for a one-off operation (not a session).
+    pub(crate) fn new(inner: &Arc<Inner>, profile: ProfileId) -> Result<Self> {
+        let holder = SessionId::new();
+        inner.claim_profile(profile, holder)?;
+        Ok(Self {
+            inner: inner.clone(),
+            profile,
+            holder,
+        })
+    }
+}
+
+impl Drop for ProfileClaim {
+    fn drop(&mut self) {
+        self.inner.unclaim_profile(self.profile, self.holder);
+    }
+}
+
 impl Inner {
     /// Counts a new non-terminal session against the owner's quota.
     pub(crate) fn admit_owner(self: &Arc<Self>, owner: &str) -> Result<Admitted> {
@@ -154,12 +180,14 @@ impl Inner {
 
     /// Erases snapshots, the profile directory (when no browser holds it) and
     /// the ownership record. Refuses while a session uses the profile.
-    pub(crate) async fn delete_profile_impl(&self, owner: &str, id: ProfileId) -> Result<u64> {
+    pub(crate) async fn delete_profile_impl(
+        self: &Arc<Self>,
+        owner: &str,
+        id: ProfileId,
+    ) -> Result<u64> {
         self.check_profile_owner(owner, id).await?;
-        let claim = SessionId::new();
-        self.claim_profile(id, claim)?;
+        let _claim = ProfileClaim::new(self, id)?;
         let result = self.erase_profile(id).await;
-        self.unclaim_profile(id, claim);
         if result.is_ok() {
             self.forget_profile_owner(id).await;
         }

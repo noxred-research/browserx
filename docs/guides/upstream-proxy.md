@@ -61,7 +61,7 @@ The sticky key is derived per session; it is not the session id and is not a sec
 | Failure | Result |
 | --- | --- |
 | The upstream refuses the credentials | The page load fails inside the browser; the forwarder counts it. Creation itself does not verify credentials |
-| The upstream is unreachable | Connection errors in the browser (`ERR_PROXY_CONNECTION_FAILED` or `ERR_TUNNEL_CONNECTION_FAILED`); `502 egress` for requests that surface through the API |
+| The upstream is unreachable, does not resolve, or its address is blocked by the egress policy | Connection errors in the browser (`ERR_PROXY_CONNECTION_FAILED` or `ERR_TUNNEL_CONNECTION_FAILED`); `502 egress` with the same text, `upstream proxy is unavailable`, for every one of these causes |
 | A destination is blocked by policy | `403` from the forwarder with a short reason; counted in `browserx_egress_refused_total` |
 
 The forwarder does not retry by itself and does not rotate to another upstream. Rotation is a decision your client makes by creating a session with a different route, or by handoff and recovery changing `{generation}`.
@@ -73,5 +73,6 @@ Do not assume. With a session created as above, navigate to a page that you oper
 ## Security notes
 
 - The browser command line holds only `--proxy-server=http://127.0.0.1:<port>`. Credentials stay in the worker.
-- The lease store holds the session spec including the proxy password, because recovery needs it. Protect `state_dir`.
+- The upstream proxy's own address is checked against `egress.block_private` / `egress.allow_cidrs` like any destination: a proxy on loopback, a private range or the metadata address is refused unless you allow its range in `egress.allow_cidrs`.
+- The lease store holds the session spec including the proxy password, because recovery needs it; the password is removed once the session is closed or lost. Protect `state_dir`.
 - Use only upstreams whose operator permits your use. BrowserX does not vouch for an upstream's policies, logging or legality.

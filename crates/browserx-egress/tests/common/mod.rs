@@ -144,7 +144,7 @@ pub struct ConnectProxy {
 
 impl ConnectProxy {
     pub async fn start(opts: ConnectOpts) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let seen: Log<ConnectSeen> = Arc::default();
         let origin_requests: Log<String> = Arc::default();
@@ -260,7 +260,7 @@ pub struct SocksProxy {
 
 impl SocksProxy {
     pub async fn start(opts: SocksOpts) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let seen: Log<SocksSeen> = Arc::default();
         let seen2 = Arc::clone(&seen);

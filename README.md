@@ -98,7 +98,7 @@ target/release/browserx doctor
 target/release/browserx keys new dev
 
 # 3. Create the snapshot encryption key (mode 0600, refuses to overwrite).
-target/release/browserx snapshot-key new ./.browserx/snapshot.key
+target/release/browserx snapshot-key new ./.browserx-keys/snapshot.key
 
 # 4. Put the printed [[auth.api_keys]] snippet into browserx.toml, then start the worker.
 target/release/browserx serve --config browserx.toml

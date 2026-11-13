@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use browserx_server::key_digest;
 use browserx_store::Sealer;
-use rand::RngCore;
+use rand::Rng;
 
 /// A fresh API key: recognizable prefix, 256 random bits.
 fn generate_key() -> String {

@@ -34,7 +34,7 @@ Create the state directory, an API key and the snapshot encryption key:
 ```sh
 mkdir -p .browserx
 browserx keys new dev
-browserx snapshot-key new ./.browserx/snapshot.key
+browserx snapshot-key new ./.browserx-keys/snapshot.key
 ```
 
 `keys new` prints the key **once**, together with a TOML snippet holding only its SHA-256 digest. Save the key somewhere safe. Start from the example configuration and paste the snippet:
@@ -141,7 +141,7 @@ browserx session create --persistence snapshot --profile-id <prf_...>
 
 ```sh
 docker compose -f docker/compose.yaml run --rm --entrypoint browserx browserx \
-  snapshot-key new /var/lib/browserx/state/snapshot.key
+  snapshot-key new /var/lib/browserx/keys/snapshot.key
 docker compose -f docker/compose.yaml run --rm --entrypoint browserx browserx keys new dev
 # put the printed sha256 into docker/browserx.docker.toml (or mount your own config), then:
 docker compose -f docker/compose.yaml up --build

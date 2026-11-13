@@ -61,10 +61,10 @@ The worker never sees the key itself, only the digest in the configuration. Noth
 Generates the snapshot encryption key file.
 
 ```sh
-browserx snapshot-key new ./.browserx/snapshot.key
+browserx snapshot-key new ./.browserx-keys/snapshot.key
 ```
 
-Missing parent directories are created with mode `0700`. The file is created with mode `0600` and the command **refuses to overwrite** an existing file. The format is `browserx-snapshot-key v1`, then `key_id=<hex8>` and `key=<base64 of 32 bytes>`. Back it up separately from the snapshots; see [operations](operations.md#key-rotation).
+Missing parent directories are created with mode `0700`. The file is created with mode `0600` and the command **refuses to overwrite** an existing file. The format is `browserx-snapshot-key v1`, then `key_id=<hex8>` and `key=<base64 of 32 bytes>`. Keep it outside the configured `state_dir` (the worker refuses a key file inside it). Back it up separately from the snapshots; see [operations](operations.md#key-rotation).
 
 ## `browserx doctor`
 
@@ -183,7 +183,7 @@ Releases the session. For a snapshot session a final snapshot is written first. 
 # one-time setup
 browserx doctor
 browserx keys new ci
-browserx snapshot-key new ./.browserx/snapshot.key
+browserx snapshot-key new ./.browserx-keys/snapshot.key
 
 # run a worker
 browserx serve --config browserx.toml --log-format json

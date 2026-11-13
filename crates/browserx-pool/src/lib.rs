@@ -48,7 +48,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-pub use config::PoolConfig;
+pub use config::{MAX_CONFIG_DURATION, PoolConfig};
 pub use event::{PoolEvent, PoolEventKind};
 pub use metrics::{HistogramSnapshot, LAUNCH_BUCKETS, MetricsSnapshot};
 pub use ops::{AttachInfo, RelayAccess, RelayGuard, ct_eq};
@@ -198,7 +198,11 @@ impl Pool {
         owner: &str,
         spec: SessionSpec,
     ) -> Result<(SessionLease, LeaseToken)> {
-        self.inner.clone().create_impl(owner.to_owned(), spec).await
+        let inner = self.inner.clone();
+        let owner = owner.to_owned();
+        self.inner
+            .run_tracked(async move { inner.create_impl(owner, spec).await })
+            .await
     }
 
     /// The owner's view of one session.
@@ -227,22 +231,36 @@ impl Pool {
         id: SessionId,
         token: &LeaseToken,
     ) -> Result<AttachInfo> {
+        let inner = self.inner.clone();
+        let owner = owner.to_owned();
+        let token = token.clone();
         self.inner
-            .attach_core(Some(owner), id, token, AttachMode::Api)
+            .run_tracked(async move {
+                inner
+                    .attach_core(Some(&owner), id, &token, AttachMode::Api)
+                    .await
+                    .map(|(info, _)| info)
+            })
             .await
-            .map(|(info, _)| info)
     }
 
     /// Opens a relay connection authenticated by the session token alone (the
-    /// token is the credential in the relay URL).
+    /// token is the credential in the relay URL). An unknown session and a wrong
+    /// token are both [`browserx_core::Error::Unauthorized`], decided before any
+    /// session state is read or locked. Opening a relay never consumes the
+    /// pending recovery outcome; only [`Pool::attach`] does.
     pub async fn open_relay(
         &self,
         id: SessionId,
         token: &LeaseToken,
     ) -> Result<(AttachInfo, RelayAccess)> {
+        let inner = self.inner.clone();
+        let token = token.clone();
         let (info, access) = self
             .inner
-            .attach_core(None, id, token, AttachMode::Relay)
+            .run_tracked(
+                async move { inner.attach_core(None, id, &token, AttachMode::Relay).await },
+            )
             .await?;
         let access = access.ok_or_else(|| {
             browserx_core::Error::Internal("relay attach returned no access".into())
@@ -267,9 +285,10 @@ impl Pool {
         expected: Generation,
         ttl: Option<Duration>,
     ) -> Result<SessionLease> {
+        let inner = self.inner.clone();
+        let (owner, token) = (owner.to_owned(), token.clone());
         self.inner
-            .clone()
-            .renew_impl(owner.to_owned(), id, token.clone(), expected, ttl)
+            .run_tracked(async move { inner.renew_impl(owner, id, token, expected, ttl).await })
             .await
     }
 
@@ -281,9 +300,10 @@ impl Pool {
         token: &LeaseToken,
         expected: Generation,
     ) -> Result<(SessionLease, LeaseToken)> {
+        let inner = self.inner.clone();
+        let (owner, token) = (owner.to_owned(), token.clone());
         self.inner
-            .clone()
-            .handoff_impl(owner.to_owned(), id, token.clone(), expected)
+            .run_tracked(async move { inner.handoff_impl(owner, id, token, expected).await })
             .await
     }
 
@@ -294,9 +314,10 @@ impl Pool {
         id: SessionId,
         token: &LeaseToken,
     ) -> Result<SnapshotMeta> {
+        let inner = self.inner.clone();
+        let (owner, token) = (owner.to_owned(), token.clone());
         self.inner
-            .clone()
-            .snapshot_impl(owner.to_owned(), id, token.clone())
+            .run_tracked(async move { inner.snapshot_impl(owner, id, token).await })
             .await
     }
 
@@ -309,15 +330,15 @@ impl Pool {
         token: Option<&LeaseToken>,
         expected: Option<Generation>,
     ) -> Result<SessionLease> {
+        let inner = self.inner.clone();
+        let owner = OwnedCaller::Owner(owner.to_owned());
+        let token = token.cloned();
         self.inner
-            .clone()
-            .release_impl(
-                OwnedCaller::Owner(owner.to_owned()),
-                id,
-                token.cloned(),
-                expected,
-                "released by owner",
-            )
+            .run_tracked(async move {
+                inner
+                    .release_impl(owner, id, token, expected, "released by owner")
+                    .await
+            })
             .await
     }
 
@@ -334,7 +355,11 @@ impl Pool {
 
     /// Erases a profile's snapshots and directory. Refused while a session uses it.
     pub async fn delete_profile(&self, owner: &str, profile: ProfileId) -> Result<u64> {
-        self.inner.delete_profile_impl(owner, profile).await
+        let inner = self.inner.clone();
+        let owner = owner.to_owned();
+        self.inner
+            .run_tracked(async move { inner.delete_profile_impl(&owner, profile).await })
+            .await
     }
 
     // ----- observability ---------------------------------------------------

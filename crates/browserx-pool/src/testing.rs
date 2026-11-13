@@ -141,6 +141,7 @@ struct Shared {
     launches: AtomicUsize,
     fail_next: AtomicUsize,
     delay_ms: AtomicU64,
+    context_delay_ms: AtomicU64,
     browsers: Mutex<Vec<Arc<FakeBrowserState>>>,
 }
 
@@ -180,6 +181,14 @@ impl FakeRuntime {
         );
     }
 
+    /// Delays every context creation (shared isolation).
+    pub fn set_context_delay(&self, delay: Duration) {
+        self.shared.context_delay_ms.store(
+            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
+    }
+
     /// Total launch attempts that succeeded.
     #[must_use]
     pub fn launch_count(&self) -> usize {
@@ -210,6 +219,7 @@ impl FakeRuntime {
 
 struct FakeHandle {
     state: Arc<FakeBrowserState>,
+    shared: Arc<Shared>,
 }
 
 #[async_trait]
@@ -240,6 +250,10 @@ impl BrowserHandle for FakeHandle {
         }
     }
     async fn create_context(&self) -> Result<ContextId> {
+        let delay = self.shared.context_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
         if !self.state.is_alive() {
             return Err(Error::Browser("browser exited".into()));
         }
@@ -353,7 +367,10 @@ impl BrowserRuntime for FakeRuntime {
         *lock(&state.ws_task) = Some(task);
         lock(&self.shared.browsers).push(state.clone());
         self.shared.launches.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(FakeHandle { state }))
+        Ok(Box::new(FakeHandle {
+            state,
+            shared: self.shared.clone(),
+        }))
     }
 
     fn launch_profiles(&self) -> Vec<String> {

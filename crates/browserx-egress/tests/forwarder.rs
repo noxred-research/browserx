@@ -21,6 +21,15 @@ fn allow_loopback() -> EgressPolicy {
     }
 }
 
+/// The fake upstream proxies listen on `127.0.0.2`; this policy lets the
+/// forwarder reach them and nothing else on the loopback range.
+fn allow_proxy_only() -> EgressPolicy {
+    EgressPolicy {
+        block_private: true,
+        allow_cidrs: vec!["127.0.0.2/32".into()],
+    }
+}
+
 fn route(url: String, user: Option<&str>, pass: Option<&str>) -> ProxyRoute {
     ProxyRoute {
         url,
@@ -205,7 +214,7 @@ async fn http_upstream_connect_with_rendered_credentials() {
         Some("pool-{session}-g{generation}"),
         Some("synthetic-secret"),
     );
-    let fwd = start(Some(r), EgressPolicy::default()).await;
+    let fwd = start(Some(r), allow_proxy_only()).await;
 
     // the destination name is resolved by the upstream, so the local policy lets it through
     let (status, mut tunnel) = connect_via(&fwd, "site.test:443").await;
@@ -227,7 +236,7 @@ async fn http_upstream_without_credentials_sends_no_auth_header() {
     let proxy = ConnectProxy::start(ConnectOpts::default()).await;
     let fwd = start(
         Some(route(proxy.url("http"), None, None)),
-        EgressPolicy::default(),
+        allow_proxy_only(),
     )
     .await;
     let (status, _) = connect_via(&fwd, "site.test:443").await;
@@ -250,7 +259,7 @@ async fn plain_http_becomes_connect_plus_origin_form_request() {
     })
     .await;
     let r = route(proxy.url("http"), Some("u-{session}"), Some("p"));
-    let fwd = start(Some(r), EgressPolicy::default()).await;
+    let fwd = start(Some(r), allow_proxy_only()).await;
 
     let response = exchange(
         &fwd,
@@ -292,7 +301,7 @@ async fn server_first_bytes_after_connect_reach_the_client() {
     .await;
     let fwd = start(
         Some(route(proxy.url("http"), None, None)),
-        EgressPolicy::default(),
+        allow_proxy_only(),
     )
     .await;
     let (status, mut tunnel) = connect_via(&fwd, "site.test:25").await;
@@ -319,7 +328,7 @@ async fn http_upstream_failures_map_to_bad_gateway_without_leaking_secrets() {
             Some("user"),
             Some("synthetic-secret"),
         )),
-        EgressPolicy::default(),
+        allow_proxy_only(),
     )
     .await;
     let response = exchange(
@@ -339,7 +348,7 @@ async fn http_upstream_failures_map_to_bad_gateway_without_leaking_secrets() {
     .await;
     let fwd = start(
         Some(route(denies.url("http"), None, None)),
-        EgressPolicy::default(),
+        allow_proxy_only(),
     )
     .await;
     let response = exchange(
@@ -352,12 +361,12 @@ async fn http_upstream_failures_map_to_bad_gateway_without_leaking_secrets() {
     fwd.shutdown().await;
 
     let dead = {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let l = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
         l.local_addr().unwrap()
     };
     let fwd = start(
         Some(route(format!("http://{dead}"), None, None)),
-        EgressPolicy::default(),
+        allow_proxy_only(),
     )
     .await;
     let (status, _) = connect_via(&fwd, "site.test:443").await;
@@ -370,7 +379,7 @@ async fn http_upstream_literals_and_localhost_are_checked_locally() {
     let proxy = ConnectProxy::start(ConnectOpts::default()).await;
     let fwd = start(
         Some(route(proxy.url("http"), None, None)),
-        EgressPolicy::default(),
+        allow_proxy_only(),
     )
     .await;
     for target in [
@@ -411,7 +420,7 @@ async fn upstream_that_never_answers_times_out() {
         Some(route(proxy.url("http"), None, None)),
         "k".into(),
         1,
-        EgressPolicy::default(),
+        allow_proxy_only(),
         options,
     )
     .await
@@ -421,10 +430,86 @@ async fn upstream_that_never_answers_times_out() {
     fwd.shutdown().await;
 }
 
+/// The upstream proxy address comes from the tenant, so it is policy-checked
+/// like any destination, and a refusal looks exactly like any other failure.
+#[tokio::test]
+async fn upstream_proxy_address_is_policy_checked_and_failures_look_alike() {
+    const UNAVAILABLE: &str = "upstream proxy is unavailable";
+    // A live listener on a policy-blocked address: it must never be dialed.
+    let internal = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let internal_port = internal.local_addr().unwrap().port();
+    // The same port number closed, on an address the policy allows.
+    let dead = {
+        let l = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    for scheme in ["http", "socks5", "socks5h"] {
+        let mut bodies = Vec::new();
+        for (host, port) in [
+            ("127.0.0.1", internal_port), // blocked by policy, listener alive
+            ("127.0.0.1", dead),          // blocked by policy, port closed
+            ("localhost", internal_port), // name resolving to loopback
+            ("127.0.0.2", dead),          // allowed by policy, port closed
+            ("[::1]", dead),              // blocked IPv6 literal
+            ("169.254.169.254", 80),      // metadata address
+        ] {
+            let policy = if host == "127.0.0.2" {
+                allow_proxy_only()
+            } else {
+                EgressPolicy::default()
+            };
+            let fwd = start(
+                Some(route(format!("{scheme}://{host}:{port}"), None, None)),
+                policy,
+            )
+            .await;
+            let response = exchange(
+                &fwd,
+                b"CONNECT 93.184.216.34:443 HTTP/1.1\r\nHost: 93.184.216.34:443\r\n\r\n",
+            )
+            .await;
+            assert_eq!(status_of(&response), 502, "{scheme} {host}: {response}");
+            assert!(
+                response.contains(UNAVAILABLE),
+                "{scheme} {host}: {response}"
+            );
+            bodies.push(response);
+            fwd.shutdown().await;
+        }
+        assert!(
+            bodies.windows(2).all(|w| w[0] == w[1]),
+            "{scheme}: refused, closed and unreachable upstreams must answer identically"
+        );
+    }
+    // none of the blocked attempts reached the live internal listener
+    assert!(
+        timeout(Duration::from_millis(200), internal.accept())
+            .await
+            .is_err(),
+        "a policy-blocked upstream proxy was dialed"
+    );
+}
+
+/// An operator who runs an internal proxy opts in through `allow_cidrs`.
+#[tokio::test]
+async fn upstream_proxy_on_an_allowed_private_address_still_works() {
+    let proxy = ConnectProxy::start(ConnectOpts::default()).await;
+    let fwd = start(
+        Some(route(proxy.url("http"), None, None)),
+        allow_proxy_only(),
+    )
+    .await;
+    let (status, _) = connect_via(&fwd, "site.test:443").await;
+    assert_eq!(status, 200);
+    assert_eq!(proxy.seen.lock().unwrap().len(), 1);
+    fwd.shutdown().await;
+}
+
 // ---------------------------------------------------------------- HTTPS upstream
 
 fn tls_material() -> (String, std::sync::Arc<rustls::ServerConfig>) {
-    let key = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+    let key = rcgen::generate_simple_self_signed(vec!["127.0.0.2".to_owned()]).unwrap();
     let pem = key.cert.pem();
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
     let cfg = rustls::ServerConfig::builder_with_provider(provider)
@@ -454,7 +539,7 @@ async fn https_upstream_uses_tls_and_trusts_only_configured_roots() {
         Some(r.clone()),
         "k".into(),
         1,
-        EgressPolicy::default(),
+        allow_proxy_only(),
         ForwarderOptions {
             extra_root_pem: Some(pem),
             ..ForwarderOptions::default()
@@ -469,7 +554,7 @@ async fn https_upstream_uses_tls_and_trusts_only_configured_roots() {
     trusting.shutdown().await;
 
     // without the private root the handshake must fail closed
-    let strict = start(Some(r), EgressPolicy::default()).await;
+    let strict = start(Some(r), allow_proxy_only()).await;
     let (status, _) = connect_via(&strict, "site.test:443").await;
     assert_eq!(status, 502);
     assert_eq!(
@@ -494,7 +579,7 @@ async fn socks5_with_credentials_resolves_locally_and_sends_the_address() {
         Some("sock-{session}-{generation}"),
         Some("sock-pass"),
     );
-    let fwd = start(Some(r), EgressPolicy::default()).await;
+    let fwd = start(Some(r), allow_proxy_only()).await;
 
     let (status, mut tunnel) = connect_via(&fwd, "93.184.216.34:443").await;
     assert_eq!(status, 200);
@@ -535,7 +620,7 @@ async fn socks5_without_credentials_offers_only_no_auth() {
     let proxy = SocksProxy::start(SocksOpts::default()).await;
     let fwd = start(
         Some(route(proxy.url("socks5"), None, None)),
-        EgressPolicy::default(),
+        allow_proxy_only(),
     )
     .await;
     let (status, _) = connect_via(&fwd, "93.184.216.34:80").await;
@@ -554,7 +639,7 @@ async fn socks5h_sends_hostnames_and_checks_only_literals() {
     .await;
     let fwd = start(
         Some(route(proxy.url("socks5h"), None, None)),
-        EgressPolicy::default(),
+        allow_proxy_only(),
     )
     .await;
 
@@ -591,7 +676,7 @@ async fn socks5_failures_map_to_bad_gateway() {
     .await;
     let fwd = start(
         Some(route(refuses.url("socks5"), None, None)),
-        EgressPolicy::default(),
+        allow_proxy_only(),
     )
     .await;
     let response = exchange(&fwd, b"CONNECT 93.184.216.34:80 HTTP/1.1\r\n\r\n").await;
@@ -610,7 +695,7 @@ async fn socks5_failures_map_to_bad_gateway() {
             Some("wrong"),
             Some("synthetic-secret"),
         )),
-        EgressPolicy::default(),
+        allow_proxy_only(),
     )
     .await;
     let response = exchange(&fwd, b"CONNECT 93.184.216.34:80 HTTP/1.1\r\n\r\n").await;
@@ -622,7 +707,7 @@ async fn socks5_failures_map_to_bad_gateway() {
     // the proxy demands auth but none is configured
     let fwd = start(
         Some(route(strict.url("socks5"), None, None)),
-        EgressPolicy::default(),
+        allow_proxy_only(),
     )
     .await;
     let (status, _) = connect_via(&fwd, "93.184.216.34:80").await;
@@ -833,7 +918,7 @@ async fn debug_output_never_contains_credentials() {
         Some("synthetic-pass"),
     );
     assert!(!format!("{r:?}").contains("synthetic-pass"));
-    let fwd = start(Some(r), EgressPolicy::default()).await;
+    let fwd = start(Some(r), allow_proxy_only()).await;
     let text = format!("{fwd:?}");
     assert!(!text.contains("synthetic"));
     fwd.shutdown().await;

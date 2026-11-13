@@ -129,3 +129,35 @@ fn profiles_with_managed_flags_are_rejected_at_construction() {
         Err(Error::InvalidRequest(_))
     ));
 }
+
+#[test]
+fn huge_startup_timeouts_are_refused_at_construction() {
+    for secs in [
+        browserx_runtime::MAX_STARTUP_TIMEOUT.as_secs() + 1,
+        u64::MAX,
+    ] {
+        let cfg = RuntimeConfig {
+            startup_timeout: Duration::from_secs(secs),
+            ..RuntimeConfig::default()
+        };
+        assert!(
+            matches!(ChromiumRuntime::new(cfg), Err(Error::InvalidRequest(_))),
+            "{secs}"
+        );
+    }
+}
+
+/// A launch that cannot finish leaves no record that a later sweep would trip over.
+#[tokio::test]
+async fn sweep_with_nothing_to_do_reports_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = runtime(
+        dir.path().join("none"),
+        &dir.path().join("tmp"),
+        Duration::from_secs(1),
+    );
+    assert_eq!(
+        rt.sweep_orphans().await.unwrap(),
+        browserx_runtime::SweepReport::default()
+    );
+}

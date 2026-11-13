@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use browserx_core::clock::ManualClock;
 use browserx_core::{
-    Error, Generation, Isolation, LeaseToken, PersistenceMode, ProxyRoute, RecoveryOutcome,
-    RecoveryPolicy, SessionId, SessionSpec, SessionStatus, SnapshotStore,
+    Error, Generation, Isolation, LeaseStore, LeaseToken, PersistenceMode, ProxyRoute,
+    RecoveryOutcome, RecoveryPolicy, SessionId, SessionSpec, SessionStatus, SnapshotStore,
 };
 use browserx_egress::EgressPolicy;
 use browserx_store::{MemoryLeaseStore, MemorySnapshotStore, Sealer};
@@ -41,7 +41,10 @@ fn harness(cfg: PoolConfig) -> H {
     let clock = Arc::new(ManualClock::new(OffsetDateTime::now_utc()));
     let leases = Arc::new(MemoryLeaseStore::with_clock(clock.clone()));
     let snaps = Arc::new(MemorySnapshotStore::new());
-    let sealer = Arc::new(Sealer::new("test0001".into(), [7u8; 32]));
+    let sealer = Arc::new(Sealer::new(
+        "test0001".into(),
+        &browserx_store::Zeroizing::new([7u8; 32]),
+    ));
     let rt = FakeRuntime::new();
     let dir = tempfile::tempdir().unwrap();
     let pool = build_pool(cfg, &rt, &leases, &snaps, &sealer, &clock, &dir);
@@ -1210,4 +1213,419 @@ async fn persona_seed_follows_the_profile_and_survives_recovery() {
         h.rt.last().unwrap().request.persona_seed,
         browserx_core::persona_seed(&plain.session_id.0)
     );
+}
+
+// ----- security review regressions ---------------------------------------
+
+async fn force_status(h: &H, id: SessionId, status: SessionStatus) {
+    let mut lease = h.leases.get(id).await.unwrap().unwrap();
+    let prior = lease.generation;
+    lease.transition(status, Some("test".into())).unwrap();
+    h.leases.compare_and_swap(prior, &lease).await.unwrap();
+}
+
+fn one_session_cfg() -> PoolConfig {
+    PoolConfig {
+        owner_quotas: std::collections::BTreeMap::from([(OWNER.to_owned(), 1)]),
+        ..test_cfg()
+    }
+}
+
+/// Polls the future once (so the operation starts) and then drops it, like a
+/// client that disconnects.
+async fn start_and_cancel<F: std::future::Future>(fut: F) {
+    use futures_util::FutureExt;
+    assert!(
+        fut.now_or_never().is_none(),
+        "operation finished before it could be cancelled"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_shared_create_completes_and_leaks_nothing() {
+    let h = harness(one_session_cfg());
+    h.rt.set_context_delay(Duration::from_millis(300));
+    let pool = h.pool.clone();
+    let task = tokio::spawn(async move { pool.create(OWNER, shared()).await });
+    // Past the browser launch, inside the context creation.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    task.abort();
+    eventually("the cancelled create finishes", || async {
+        h.pool.list(OWNER, None).await.unwrap().len() == 1
+    })
+    .await;
+    let leases = h.pool.list(OWNER, None).await.unwrap();
+    assert_eq!(leases[0].status, SessionStatus::Idle);
+    assert_eq!(h.rt.launch_count(), 1);
+    assert_eq!(h.rt.last().unwrap().context_count(), 1);
+    // The quota slot belongs to the persisted lease.
+    assert!(matches!(
+        h.pool.create(OWNER, shared()).await,
+        Err(Error::Capacity(_))
+    ));
+    h.pool
+        .release(OWNER, leases[0].session_id, None, None)
+        .await
+        .unwrap();
+    assert_eq!(h.rt.last().unwrap().context_count(), 0);
+    assert!(
+        h.rt.alive().is_empty(),
+        "no browser may outlive its session"
+    );
+    assert_eq!(h.pool.metrics().await.browsers["shared_browser"], 0);
+    h.rt.set_context_delay(Duration::ZERO);
+    h.pool.create(OWNER, shared()).await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_dedicated_create_completes_and_leaks_nothing() {
+    let h = harness(one_session_cfg());
+    h.rt.set_launch_delay(Duration::from_millis(300));
+    let pool = h.pool.clone();
+    let task = tokio::spawn(async move { pool.create(OWNER, SessionSpec::default()).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    task.abort();
+    eventually("the cancelled create finishes", || async {
+        h.pool.list(OWNER, None).await.unwrap().len() == 1
+    })
+    .await;
+    let lease = h.pool.list(OWNER, None).await.unwrap().remove(0);
+    assert_eq!(lease.status, SessionStatus::Idle);
+    assert_eq!(h.rt.alive().len(), 1);
+    h.pool
+        .release(OWNER, lease.session_id, None, None)
+        .await
+        .unwrap();
+    assert!(h.rt.alive().is_empty());
+    assert_eq!(h.pool.metrics().await.browsers["dedicated_browser"], 0);
+}
+
+#[tokio::test]
+async fn cancelled_handoff_still_rotates_the_token_and_emits_the_event() {
+    let h = harness(test_cfg());
+    let (lease, token) = h.pool.create(OWNER, SessionSpec::default()).await.unwrap();
+    let mut events = h.pool.subscribe();
+    start_and_cancel(
+        h.pool
+            .handoff(OWNER, lease.session_id, &token, Generation(1)),
+    )
+    .await;
+    eventually("the handoff commits", || async {
+        h.pool
+            .get(OWNER, lease.session_id)
+            .await
+            .unwrap()
+            .generation
+            == Generation(2)
+    })
+    .await;
+    let stored = h.pool.get(OWNER, lease.session_id).await.unwrap();
+    assert_ne!(stored.token_digest, Some(token.digest()));
+    let mut saw = false;
+    while let Ok(event) = events.try_recv() {
+        saw |= event.kind == crate::PoolEventKind::HandedOff;
+    }
+    assert!(saw, "the HandedOff event must not be lost");
+}
+
+#[tokio::test]
+async fn cancelled_release_still_closes_the_session() {
+    let h = harness(test_cfg());
+    let (lease, _token) = h.pool.create(OWNER, SessionSpec::default()).await.unwrap();
+    start_and_cancel(h.pool.release(OWNER, lease.session_id, None, None)).await;
+    eventually("the release finishes", || async {
+        h.pool.get(OWNER, lease.session_id).await.unwrap().status == SessionStatus::Closed
+    })
+    .await;
+    assert!(h.rt.alive().is_empty());
+    assert_eq!(h.pool.metrics().await.browsers["dedicated_browser"], 0);
+}
+
+#[tokio::test]
+async fn reaper_finishes_a_stuck_draining_lease() {
+    let h = harness(one_session_cfg());
+    let (lease, _token) = h.pool.create(OWNER, SessionSpec::default()).await.unwrap();
+    // What a cancelled release or a failed compare-and-swap leaves behind.
+    force_status(&h, lease.session_id, SessionStatus::Draining).await;
+    assert!(matches!(
+        h.pool.create(OWNER, SessionSpec::default()).await,
+        Err(Error::Capacity(_))
+    ));
+    h.pool.inner.reap_tick(false).await;
+    let closed = h.pool.get(OWNER, lease.session_id).await.unwrap();
+    assert_eq!(closed.status, SessionStatus::Closed);
+    assert!(h.rt.alive().is_empty());
+    h.pool
+        .create(OWNER, SessionSpec::default())
+        .await
+        .expect("quota and browser slot are free again");
+}
+
+#[tokio::test]
+async fn reaper_retries_a_stuck_recovering_lease() {
+    let h = harness(test_cfg());
+    let (lease, _token) = h.pool.create(OWNER, SessionSpec::default()).await.unwrap();
+    let browser = h.rt.last().unwrap();
+    browser.kill();
+    force_status(&h, lease.session_id, SessionStatus::Recovering).await;
+    h.pool.inner.reap_tick(false).await;
+    let recovered = h.pool.get(OWNER, lease.session_id).await.unwrap();
+    assert_eq!(recovered.status, SessionStatus::Idle);
+    assert_eq!(recovered.generation, Generation(2));
+    assert_eq!(h.rt.alive().len(), 1);
+}
+
+#[tokio::test]
+async fn reaper_releases_an_expired_recovering_lease() {
+    let h = harness(test_cfg());
+    let s = SessionSpec {
+        ttl_secs: Some(60),
+        ..SessionSpec::default()
+    };
+    let (lease, _token) = h.pool.create(OWNER, s).await.unwrap();
+    h.rt.last().unwrap().kill();
+    force_status(&h, lease.session_id, SessionStatus::Recovering).await;
+    h.clock.advance(time::Duration::seconds(61));
+    h.pool.inner.reap_tick(false).await;
+    let closed = h.pool.get(OWNER, lease.session_id).await.unwrap();
+    assert_eq!(closed.status, SessionStatus::Closed);
+    assert_eq!(closed.reason.as_deref(), Some("lease expired"));
+}
+
+#[tokio::test]
+async fn reaper_leaves_a_busy_session_alone() {
+    let h = harness(test_cfg());
+    let (lease, _token) = h.pool.create(OWNER, SessionSpec::default()).await.unwrap();
+    force_status(&h, lease.session_id, SessionStatus::Draining).await;
+    // An operation in flight holds the control mutex; the reaper must not interfere.
+    let guard = h.pool.inner.lock_session(lease.session_id).await.unwrap();
+    h.pool.inner.reap_tick(false).await;
+    assert_eq!(
+        h.pool.get(OWNER, lease.session_id).await.unwrap().status,
+        SessionStatus::Draining
+    );
+    drop(guard);
+    h.pool.inner.reap_tick(false).await;
+    assert_eq!(
+        h.pool.get(OWNER, lease.session_id).await.unwrap().status,
+        SessionStatus::Closed
+    );
+}
+
+#[tokio::test]
+async fn relay_open_does_not_consume_the_recovery_outcome() {
+    let h = harness(test_cfg());
+    let (lease, token) = h.pool.create(OWNER, SessionSpec::default()).await.unwrap();
+    h.rt.last().unwrap().kill();
+    // A client reconnecting its WebSocket after the crash recovers the browser...
+    let (_info, access) = h.pool.open_relay(lease.session_id, &token).await.unwrap();
+    drop(access);
+    // ...but the controller that asks through the API still learns what happened.
+    let info = h
+        .pool
+        .attach(OWNER, lease.session_id, &token)
+        .await
+        .unwrap();
+    assert_eq!(info.outcome, RecoveryOutcome::FreshProcess);
+    let again = h
+        .pool
+        .attach(OWNER, lease.session_id, &token)
+        .await
+        .unwrap();
+    assert_eq!(again.outcome, RecoveryOutcome::ResumedSameProcess);
+}
+
+#[tokio::test]
+async fn relay_open_is_uniformly_unauthorized_before_any_state_check() {
+    let h = harness(test_cfg());
+    let (lease, token) = h.pool.create(OWNER, SessionSpec::default()).await.unwrap();
+    let wrong = LeaseToken::generate();
+    assert!(matches!(
+        h.pool.open_relay(SessionId::new(), &wrong).await,
+        Err(Error::Unauthorized)
+    ));
+    assert!(matches!(
+        h.pool.open_relay(lease.session_id, &wrong).await,
+        Err(Error::Unauthorized)
+    ));
+    // The session mutex is busy: a caller without the token must not queue on it.
+    let guard = h.pool.inner.lock_session(lease.session_id).await.unwrap();
+    let denied = tokio::time::timeout(
+        Duration::from_millis(500),
+        h.pool.open_relay(lease.session_id, &wrong),
+    )
+    .await
+    .expect("an unauthenticated call must not wait for the session");
+    assert!(matches!(denied, Err(Error::Unauthorized)));
+    let denied = tokio::time::timeout(
+        Duration::from_millis(500),
+        h.pool.attach(OWNER, lease.session_id, &wrong),
+    )
+    .await
+    .expect("a wrong token must not wait for the session");
+    assert!(matches!(denied, Err(Error::Forbidden(_))));
+    drop(guard);
+    // A finished session does not reveal its state to a wrong token either.
+    h.pool
+        .release(OWNER, lease.session_id, Some(&token), None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        h.pool.open_relay(lease.session_id, &wrong).await,
+        Err(Error::Unauthorized)
+    ));
+    assert!(matches!(
+        h.pool.open_relay(lease.session_id, &token).await,
+        Err(Error::Conflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn huge_idle_timeout_is_refused_and_time_arithmetic_saturates() {
+    let h = harness(test_cfg());
+    for idle in [u64::MAX, 86_401] {
+        let s = SessionSpec {
+            idle_timeout_secs: Some(idle),
+            ..SessionSpec::default()
+        };
+        assert!(
+            matches!(h.pool.create(OWNER, s).await, Err(Error::InvalidRequest(_))),
+            "idle_timeout_secs {idle}"
+        );
+    }
+    let now = OffsetDateTime::now_utc();
+    assert!(crate::ops::add_duration(now, Duration::MAX) > now);
+    assert!(crate::ops::add_duration(now, Duration::from_secs(u64::MAX)) > now);
+
+    // The largest accepted value keeps the session alive through the reaper.
+    let s = SessionSpec {
+        idle_timeout_secs: Some(86_400),
+        ..SessionSpec::default()
+    };
+    let (lease, _token) = h.pool.create(OWNER, s).await.unwrap();
+    h.clock.advance(time::Duration::seconds(120));
+    h.pool.run_maintenance().await;
+    assert_eq!(
+        h.pool.get(OWNER, lease.session_id).await.unwrap().status,
+        SessionStatus::Idle
+    );
+}
+
+#[tokio::test]
+async fn config_durations_are_bounded() {
+    for cfg in [
+        PoolConfig {
+            max_lifetime: Duration::MAX,
+            ..PoolConfig::default()
+        },
+        PoolConfig {
+            default_idle_timeout: Duration::from_secs(u64::MAX),
+            ..PoolConfig::default()
+        },
+        PoolConfig {
+            terminal_retention: crate::MAX_CONFIG_DURATION + Duration::from_secs(1),
+            ..PoolConfig::default()
+        },
+    ] {
+        assert!(matches!(cfg.validate(), Err(Error::InvalidRequest(_))));
+    }
+    PoolConfig {
+        max_lifetime: crate::MAX_CONFIG_DURATION,
+        ..PoolConfig::default()
+    }
+    .validate()
+    .unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_shared_recoveries_launch_one_browser() {
+    let h = harness(test_cfg());
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        ids.push(h.pool.create(OWNER, shared()).await.unwrap().0.session_id);
+    }
+    assert_eq!(h.rt.launch_count(), 1);
+    h.rt.last().unwrap().kill();
+    h.rt.set_launch_delay(Duration::from_millis(150));
+    h.pool.run_maintenance().await;
+    assert_eq!(
+        h.rt.launch_count(),
+        2,
+        "four recoveries must share one replacement browser"
+    );
+    assert_eq!(h.rt.alive().len(), 1);
+    for id in ids {
+        let lease = h.pool.get(OWNER, id).await.unwrap();
+        assert_eq!(lease.status, SessionStatus::Idle);
+        assert_eq!(lease.generation, Generation(2));
+    }
+    assert_eq!(h.pool.metrics().await.browsers["shared_browser"], 1);
+}
+
+#[tokio::test]
+async fn concurrent_shared_creates_share_a_launching_browser() {
+    let h = harness(test_cfg());
+    h.rt.set_launch_delay(Duration::from_millis(150));
+    let creates = (0..3)
+        .map(|_| h.pool.create(OWNER, shared()))
+        .collect::<Vec<_>>();
+    for result in futures_util::future::join_all(creates).await {
+        result.unwrap();
+    }
+    assert_eq!(h.rt.launch_count(), 1);
+}
+
+#[tokio::test]
+async fn failed_shared_launch_does_not_strand_waiters() {
+    let h = harness(test_cfg());
+    h.rt.set_launch_delay(Duration::from_millis(100));
+    h.rt.fail_next_launches(1);
+    let creates = (0..2)
+        .map(|_| h.pool.create(OWNER, shared()))
+        .collect::<Vec<_>>();
+    let results = futures_util::future::join_all(creates).await;
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|r| r.is_err()).count(), 1);
+}
+
+#[tokio::test]
+async fn profile_claim_guard_gives_the_claim_back() {
+    let h = harness(test_cfg());
+    let profile = browserx_core::ProfileId::new();
+    let claim = crate::profiles::ProfileClaim::new(&h.pool.inner, profile).unwrap();
+    assert!(matches!(
+        crate::profiles::ProfileClaim::new(&h.pool.inner, profile),
+        Err(Error::Conflict(_))
+    ));
+    drop(claim);
+    drop(crate::profiles::ProfileClaim::new(&h.pool.inner, profile).unwrap());
+    assert!(h.pool.inner.st().profiles.is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_delete_profile_leaves_no_claim() {
+    let h = harness(test_cfg());
+    let (lease, token) = h
+        .pool
+        .create(OWNER, spec(PersistenceMode::Profile))
+        .await
+        .unwrap();
+    let profile = lease.profile_id.unwrap();
+    h.pool
+        .release(OWNER, lease.session_id, Some(&token), None)
+        .await
+        .unwrap();
+    start_and_cancel(h.pool.delete_profile(OWNER, profile)).await;
+    eventually("the cancelled delete finishes", || async {
+        matches!(
+            h.pool.list_profile_snapshots(OWNER, profile).await,
+            Err(Error::NotFound(_))
+        )
+    })
+    .await;
+    assert!(h.pool.inner.st().profiles.is_empty());
+    assert!(matches!(
+        h.pool.delete_profile(OWNER, profile).await,
+        Err(Error::NotFound(_))
+    ));
 }

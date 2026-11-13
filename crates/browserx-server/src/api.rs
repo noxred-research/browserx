@@ -36,6 +36,7 @@ pub(crate) struct AppInner {
     pub default_launch_profile: String,
     pub ready: ReadyProbe,
     pub relay_stop: CancellationToken,
+    pub relay: crate::relay::RelayHub,
 }
 
 /// Shared state of the HTTP handlers. Cheap to clone.
@@ -79,6 +80,7 @@ impl AppState {
                 default_launch_profile,
                 ready,
                 relay_stop: CancellationToken::new(),
+                relay: crate::relay::RelayHub::default(),
             }),
         })
     }

@@ -4,7 +4,7 @@ Running a BrowserX worker: what to watch, how to back it up, how to rotate keys,
 
 ## Deployment shape
 
-- One worker is one process on one machine. It owns the browsers it launched; they die with it.
+- One worker is one process on one machine. It owns the browsers it launched. If the worker crashes they keep running until the next worker starts and kills the ones it can verify (see [startup reconciliation](../design/recovery.md#startup-reconciliation)).
 - Run it as an unprivileged user with a dedicated `state_dir`, under a supervisor that restarts it (systemd, a container runtime).
 - Size the host for `pool.max_browsers` browsers. A headless Chromium typically needs several hundred MiB; leave headroom for page memory and for browsers being launched or torn down.
 - Put a TLS-terminating reverse proxy in front for any remote client; keep paths for `/cdp/` out of its logs. See [isolation and security](../design/isolation-and-security.md#transport).
@@ -54,7 +54,7 @@ Lease tokens, API keys, proxy credentials and the CDP relay path are never logge
 
 ## Backups
 
-Everything persistent lives under `state_dir` (and the key file named by `storage.snapshot_key_file`).
+Everything persistent lives under `state_dir` and the key file named by `storage.snapshot_key_file`, which must sit outside `state_dir` (browsers run as the worker's uid, so the key must not be readable through one).
 
 | Path | What it is | How to back it up |
 | --- | --- | --- |
@@ -67,7 +67,7 @@ Everything persistent lives under `state_dir` (and the key file named by `storag
 Restoring a backup to a fresh `state_dir`:
 
 1. Put the key file, `snapshots/`, `browserx.db`, `profiles/.owners/` and the profile directories in place with owner-only permissions (`0700` for directories, `0600` for files).
-2. Start the worker. Every lease in a non-terminal state is treated as orphaned and recovered per its recovery policy: `restored_from_snapshot`, `restored_from_profile` or `fresh_process`, or `lost` with `recovery = "none"`. See [startup reconciliation](../design/recovery.md#startup-reconciliation).
+2. Start the worker. It first kills browsers left behind by a crashed predecessor and removes their temporary directories, then every lease in a non-terminal state is treated as orphaned and recovered per its recovery policy: `restored_from_snapshot`, `restored_from_profile` or `fresh_process`, or `lost` with `recovery = "none"`. See [startup reconciliation](../design/recovery.md#startup-reconciliation).
 3. Profile sessions restored onto another machine come back as `restored_from_profile` only if the profile directories came with them and are usable with the local Chromium; otherwise treat them as snapshot-less.
 
 A backup of the state directory contains session cookies (in sealed snapshots, and in plain form inside profile directories). Protect backups like the credentials they hold.

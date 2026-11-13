@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use browserx_core::{Error, ProfileId, Result, Snapshot, SnapshotMeta, SnapshotStore};
-use rand::RngCore;
+use rand::Rng;
 
 use crate::MAX_SEALED_BYTES;
 use crate::common::check_put;

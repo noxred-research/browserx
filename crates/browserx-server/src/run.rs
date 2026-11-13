@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::api::{AppState, ReadyProbe, api_router};
 use crate::auth::Authenticator;
 use crate::config::Config;
+use crate::listener::serve_http;
 use crate::ops::ops_router;
 
 /// How long open requests get to finish after a shutdown signal.
@@ -27,6 +28,16 @@ fn create_private_dir(path: &Path) -> Result<()> {
         .mode(0o700)
         .create(path)
         .map_err(|e| Error::Storage(format!("create {}: {e}", path.display())))
+}
+
+/// Download directories belong to sessions of a previous run; start empty.
+fn reset_downloads_dir(path: &Path) -> Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::Storage(format!("clear {}: {e}", path.display()))),
+    }
+    create_private_dir(path)
 }
 
 fn load_sealer(cfg: &Config) -> Result<Sealer> {
@@ -46,7 +57,10 @@ fn load_sealer(cfg: &Config) -> Result<Sealer> {
 }
 
 /// Builds the scheduler and the HTTP state from a validated configuration.
-pub fn build(cfg: &Config) -> Result<(Pool, AppState)> {
+///
+/// Leftovers of a previous worker (browsers, scratch directories, session
+/// download directories) are swept before anything launches.
+pub async fn build(cfg: &Config) -> Result<(Pool, AppState)> {
     let storage = &cfg.storage;
     for dir in [
         &storage.state_dir,
@@ -56,9 +70,16 @@ pub fn build(cfg: &Config) -> Result<(Pool, AppState)> {
     ] {
         create_private_dir(dir)?;
     }
+    reset_downloads_dir(&storage.downloads_dir())?;
     let mut runtime_cfg = cfg.runtime.clone();
     runtime_cfg.temp_root = storage.temp_dir();
     let runtime = ChromiumRuntime::new(runtime_cfg.clone())?;
+    let report = runtime.sweep_orphans().await?;
+    tracing::info!(
+        killed = report.killed,
+        removed_dirs = report.removed_dirs,
+        "swept leftover browsers"
+    );
     let leases = SqliteLeaseStore::open(&storage.db_path())?;
     let snapshots = FileSnapshotStore::new(storage.snapshots_dir())?;
     let sealer = load_sealer(cfg)?;
@@ -95,6 +116,7 @@ pub fn build(cfg: &Config) -> Result<(Pool, AppState)> {
         default_profile,
         ready,
     )?;
+    state.set_limits(cfg.server_limits()?);
     Ok((pool, state))
 }
 
@@ -109,12 +131,21 @@ pub async fn serve(
 ) -> Result<()> {
     let api_stop = CancellationToken::new();
     let ops_stop = CancellationToken::new();
-    let api_server = axum::serve(api, api_router(state.clone()))
-        .with_graceful_shutdown(api_stop.clone().cancelled_owned());
-    let ops_server = axum::serve(ops, ops_router(state.clone()))
-        .with_graceful_shutdown(ops_stop.clone().cancelled_owned());
-    let mut api_task = tokio::spawn(async move { api_server.await });
-    let mut ops_task = tokio::spawn(async move { ops_server.await });
+    let limits = state.limits();
+    let mut api_task = tokio::spawn(serve_http(
+        api,
+        api_router(state.clone()),
+        limits.header_read_timeout,
+        limits.max_connections,
+        api_stop.clone(),
+    ));
+    let mut ops_task = tokio::spawn(serve_http(
+        ops,
+        ops_router(state.clone()),
+        limits.header_read_timeout,
+        limits.ops_max_connections,
+        ops_stop.clone(),
+    ));
 
     let mut failure: Option<Error> = None;
     tokio::select! {
@@ -159,7 +190,7 @@ fn task_error(
 
 /// Runs a server from configuration until `shutdown` resolves.
 pub async fn run(cfg: Config, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
-    let (pool, state) = build(&cfg)?;
+    let (pool, state) = build(&cfg).await?;
     let bind = |what: &'static str, addr: std::net::SocketAddr| async move {
         TcpListener::bind(addr)
             .await

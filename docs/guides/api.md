@@ -5,7 +5,7 @@ The public listener (`server.listen`) serves a JSON API under `/v1` and a WebSoc
 ## Conventions
 
 - **Authentication.** Every `/v1` request carries `Authorization: Bearer <api key>`. Keys are matched by SHA-256 digest in constant time. A missing or wrong key is `401 unauthorized`.
-- **Lease token.** Controller operations also carry the session's token in the `X-BrowserX-Token` header (or, for the relay, in the URL path). A wrong or stale token is `403 forbidden`.
+- **Lease token.** Controller operations also carry the session's token in the `X-BrowserX-Token` header (or, for the relay, in the URL path). A wrong or stale token is `403 forbidden` on the `/v1` operations; on the relay it is `401 unauthorized`, the same answer as an unknown session. The token is checked before any session state is read, so a caller without it learns nothing about a session.
 - **Ownership.** An API key sees and operates only on the sessions and profiles it created. Another owner's session or profile id answers `404 not_found`, exactly as a missing one does.
 - **Bodies.** Request and response bodies are JSON. Request bodies reject unknown fields. `POST /v1/sessions` accepts an empty body (same as `{}`); `renew` and `handoff` need a body with `generation`.
 - **Identifiers.** `ses_...` (session), `prf_...` (profile). Both the prefixed form and the bare UUID are accepted in paths.
@@ -91,7 +91,7 @@ Creates a session. Body: a `SessionSpec`.
 }
 ```
 
-The `token` is returned **once**; only its digest is stored. Errors: `400 invalid_request` (bad spec, or a duration above the server maximum), `401`, `404 not_found` (unknown `profile_id`), `409 conflict` or `profile_locked` (the profile is in use), `429 capacity` (quota, full queue or wait deadline), `502 browser` / `egress` (launch or upstream failure), `503 shutting_down`.
+The `token` is returned **once**; only its digest is stored. Errors: `400 invalid_request` (bad spec, or a `ttl_secs`, `max_lifetime_secs` or `idle_timeout_secs` above the server maximum lifetime), `401`, `404 not_found` (unknown `profile_id`), `409 conflict` or `profile_locked` (the profile is in use), `429 capacity` (quota, full queue or wait deadline), `502 browser` / `egress` (launch or upstream failure), `503 shutting_down`.
 
 ### `GET /v1/sessions`
 
@@ -118,7 +118,7 @@ Header `X-BrowserX-Token`. Marks the session in use and reports how it got its b
 }
 ```
 
-If the browser is alive the outcome is `resumed_same_process`, except that a recovery since the last attach is reported once. If the browser is dead and recovery is allowed, the worker recovers (bounded) and reports that outcome. Errors: `403` (wrong token), `404`, `409 conflict` (the session is closed, lost or draining), `502 browser`, `504 timeout`.
+If the browser is alive the outcome is `resumed_same_process`, except that a recovery since the last attach is reported once, to the first `POST .../attach` (a relay connection does not count). If the browser is dead and recovery is allowed, the worker recovers (bounded) and reports that outcome. Errors: `403` (wrong token), `404`, `409 conflict` (the session is closed, lost or draining), `502 browser`, `504 timeout`.
 
 ### `POST /v1/sessions/{id}/renew`
 
@@ -174,9 +174,10 @@ Returns the names this worker offers and the default: `{ "default": "default", "
 
 WebSocket upgrade. The token is in the path because many CDP clients accept only a URL. The server does not log paths of this route; do not log them in front of it either.
 
-- The server verifies the token digest and that the session is attachable. A failed check refuses the upgrade (`403` for a bad token, `404` for an unknown session, `409` for a closed one).
-- **Dedicated isolation:** a byte relay to the browser-level DevTools endpoint. Messages are bounded at 64 MiB.
-- **Shared isolation:** a scoped relay that allows only the session's browser context; see [isolation and security](../design/isolation-and-security.md#shared-browser). A refused command answers with a CDP error response (`code -32000`) on that command; the connection stays open.
+- The server verifies the token digest first and answers `401` for a wrong or stale token and for an unknown session, without telling them apart. Only a caller holding a valid token learns more: `409` for a closed or releasing session. Opening a relay does not consume the recovery outcome; only `POST .../attach` reports it.
+- **Dedicated isolation:** a relay to the browser-level DevTools endpoint that applies the [host-protection rules](../design/isolation-and-security.md#host-protection-rules) (no `file:` or internal-page navigation, no per-context proxy, downloads confined to a per-session directory); everything else passes through. Messages are bounded at 64 MiB.
+- **Shared isolation:** a scoped relay that allows only the session's browser context; see [isolation and security](../design/isolation-and-security.md#shared-browser). A refused command answers with a CDP error response (`code -32000`) on that command; the connection stays open. Messages are bounded at `scoped_relay_max_message_bytes` (16 MiB by default).
+- A session accepts at most `max_relay_connections_per_session` (default 4) relay connections at once; another upgrade is refused with `429 capacity` until one closes.
 - The connection closes when the session is handed off (the old token's connections), when recovery starts or finishes (the browser behind it is gone), when the session is released, closed or lost, and when the worker shuts down. A clean `attach` after that gives you a new connection.
 - The server pings every 30 seconds and closes a connection on which the client has sent no frame (a pong counts) for 120 seconds; standard WebSocket clients answer pings automatically.
 - When the last relay connection of a session closes, the session becomes `idle`.
@@ -192,8 +193,8 @@ Every error has the same body:
 | `code` | HTTP | Meaning |
 | --- | --- | --- |
 | `invalid_request` | 400 | Malformed request or unsupported combination |
-| `unauthorized` | 401 | Missing or wrong API key |
-| `forbidden` | 403 | Missing, wrong or stale lease token, or an operation the credential does not allow |
+| `unauthorized` | 401 | Missing or wrong API key; on the relay, also a wrong token or an unknown session |
+| `forbidden` | 403 | Missing, wrong or stale lease token on a `/v1` call, or an operation the credential does not allow |
 | `not_found` | 404 | No such session, profile or snapshot (or not yours) |
 | `stale_generation` | 409 | The lease moved on; read it and decide |
 | `conflict` | 409 | The session's state forbids the operation |

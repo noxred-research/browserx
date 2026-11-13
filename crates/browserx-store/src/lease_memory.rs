@@ -11,7 +11,7 @@ use browserx_core::{
 };
 use time::OffsetDateTime;
 
-use crate::common::check_cas;
+use crate::common::{check_cas, scrubbed_if_terminal};
 
 struct Entry {
     lease: SessionLease,
@@ -67,7 +67,7 @@ impl LeaseStore for MemoryLeaseStore {
         map.insert(
             lease.session_id,
             Entry {
-                lease: lease.clone(),
+                lease: scrubbed_if_terminal(lease).unwrap_or_else(|| lease.clone()),
                 updated_at: now,
             },
         );
@@ -85,7 +85,7 @@ impl LeaseStore for MemoryLeaseStore {
             .get_mut(&lease.session_id)
             .ok_or_else(|| Error::NotFound(format!("lease {}", lease.session_id)))?;
         check_cas(entry.lease.generation, expected, lease)?;
-        entry.lease = lease.clone();
+        entry.lease = scrubbed_if_terminal(lease).unwrap_or_else(|| lease.clone());
         entry.updated_at = now;
         Ok(())
     }

@@ -19,7 +19,7 @@ A client creates a session by sending a `SessionSpec` (JSON, unknown fields are 
 | `recovery` | `restore` \| `none` | `restore` | What the scheduler may do when the browser is lost; see [recovery](recovery.md) |
 | `labels` | map of string to string | empty | Free-form bookkeeping, not interpreted. At most 32 labels, keys and values at most 256 bytes |
 
-Requested durations above the server's maximums (`session.max_ttl_secs`, `session.max_lifetime_secs`) are refused with `invalid_request`; omitted ones take the server defaults.
+Requested durations above the server's maximums (`session.max_ttl_secs`, `session.max_lifetime_secs`) are refused with `invalid_request`; an `idle_timeout_secs` longer than the maximum lifetime is refused too, since the lifetime would end the session first. Omitted values take the server defaults.
 
 Combinations that contradict each other are refused at admission with `invalid_request`:
 
@@ -96,7 +96,7 @@ Every lease mutation is *load, modify, compare-and-swap on the expected generati
 
 `POST /v1/sessions` returns a token of the form `bxt_<64 hex characters>`: 32 random bytes with a recognizable prefix so secret scanners can find it. It is returned once. The server stores only its SHA-256 digest and compares in constant time.
 
-The token authorizes the controller operations (`attach`, `renew`, `handoff`, `snapshot`, `release`) together with the owner's API key (a wrong token answers `forbidden`), and it appears in the `cdp_url`. Treat it as a credential. Handoff replaces it; the old token stops working immediately.
+The token authorizes the controller operations (`attach`, `renew`, `handoff`, `snapshot`, `release`) together with the owner's API key (a wrong token answers `forbidden`; on the relay, `unauthorized`), and it appears in the `cdp_url`. Treat it as a credential. Handoff replaces it; the old token stops working immediately.
 
 ## Time limits
 
@@ -107,7 +107,13 @@ The token authorizes the controller operations (`attach`, `renew`, `handoff`, `s
 | Idle timeout | `idle_timeout_secs` | A session with no attached controller is released after this long |
 | Terminal retention | `session.terminal_retention_secs` | Closed and lost leases stay readable for this long, then are purged |
 
-The reaper releases expired sessions through the normal `draining` path, so a snapshot session gets its final snapshot.
+The reaper releases expired sessions through the normal `draining` path, so a snapshot session gets its final snapshot. Time arithmetic saturates at the far future rather than wrapping, and the pool refuses configured durations above ten years, so an oversized value can never make a session look instantly expired.
+
+The reaper also finishes leases that an operation left in `draining` or `recovering`. Every operation holds the session's control mutex from its first lease change to its last, so a transient lease nobody holds the mutex for is stranded: the reaper retries the release (`draining`), releases it when expired, or retries the recovery (`recovering`). Otherwise such a lease would hold the owner's quota, the profile claim and possibly a browser until the worker restarted.
+
+## Operations run to completion
+
+`create`, `attach`, `renew`, `handoff`, `snapshot`, `release` and profile deletion run in a tracked task that the client connection does not own. If the client disconnects or times out mid-call, the operation still finishes (or rolls back by itself), so it cannot leak a browser, a context slot, a quota slot or a profile claim, and a handoff cannot half-commit. The caller that disconnected simply does not see the response: a created session whose token was never delivered ends at its idle timeout, and an owner who lost the token of a handoff can release the session with the API key alone. Graceful shutdown waits for these tasks (bounded) before stopping browsers.
 
 ## Admission
 

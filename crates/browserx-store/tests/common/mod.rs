@@ -11,7 +11,7 @@ use browserx_core::{
     SessionId, SessionLease, SessionSpec, SessionStatus, Snapshot, SnapshotMeta, SnapshotStore,
     StateSnapshot, WorkerId,
 };
-use browserx_store::Sealer;
+use browserx_store::{Sealer, Zeroizing};
 use time::{Duration, OffsetDateTime};
 
 pub fn epoch() -> OffsetDateTime {
@@ -198,10 +198,50 @@ pub async fn lease_store_conformance(store: Arc<dyn LeaseStore>, clock: Arc<Manu
         1
     );
     assert!(store.get(recent.session_id).await.unwrap().is_none());
+
+    // the upstream proxy password lives only as long as the lease can recover
+    let now = clock.now();
+    let mut proxied = lease("scrub", SessionStatus::Idle, now);
+    proxied.spec.proxy = Some(ProxyRoute {
+        url: "http://proxy.invalid:3128".into(),
+        username: Some("user".into()),
+        password: Some(Secret::new("synthetic-scrub-password")),
+    });
+    store.insert(&proxied).await.unwrap();
+    let mut draining = proxied.clone();
+    draining.status = SessionStatus::Draining;
+    store
+        .compare_and_swap(Generation(1), &draining)
+        .await
+        .unwrap();
+    let kept = store.get(proxied.session_id).await.unwrap().unwrap();
+    assert_eq!(
+        kept.spec.proxy.as_ref().unwrap().password,
+        Some(Secret::new("synthetic-scrub-password")),
+        "a lease that can still recover keeps its password"
+    );
+    let mut closed = draining.clone();
+    closed.status = SessionStatus::Closed;
+    store
+        .compare_and_swap(Generation(1), &closed)
+        .await
+        .unwrap();
+    let terminal = store.get(proxied.session_id).await.unwrap().unwrap();
+    let proxy = terminal.spec.proxy.as_ref().unwrap();
+    assert_eq!(proxy.password, None, "terminal leases drop the password");
+    assert_eq!(proxy.username.as_deref(), Some("user"));
+    assert_eq!(proxy.url, "http://proxy.invalid:3128");
+
+    // a lease inserted already terminal is scrubbed too
+    let mut born_terminal = lease("scrub", SessionStatus::Closed, now);
+    born_terminal.spec.proxy.clone_from(&proxied.spec.proxy);
+    store.insert(&born_terminal).await.unwrap();
+    let stored = store.get(born_terminal.session_id).await.unwrap().unwrap();
+    assert_eq!(stored.spec.proxy.unwrap().password, None);
 }
 
 pub fn test_sealer() -> Sealer {
-    Sealer::new("0badc0de".into(), [42u8; 32])
+    Sealer::new("0badc0de".into(), &Zeroizing::new([42u8; 32]))
 }
 
 pub fn sample_state(tag: &str) -> StateSnapshot {

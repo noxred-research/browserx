@@ -8,7 +8,7 @@ use browserx_core::clock::SystemClock;
 use browserx_egress::EgressPolicy;
 use browserx_pool::testing::FakeRuntime;
 use browserx_pool::{Pool, PoolConfig};
-use browserx_server::{ApiKeyConfig, AppState, Authenticator, key_digest, serve};
+use browserx_server::{ApiKeyConfig, AppState, Authenticator, ServerLimits, key_digest, serve};
 use browserx_store::{MemoryLeaseStore, MemorySnapshotStore, Sealer};
 use serde_json::Value;
 use tokio::net::TcpListener;
@@ -50,6 +50,17 @@ pub async fn start_with(
     cfg: PoolConfig,
     max_sessions: usize,
 ) -> TestServer {
+    start_with_limits(runtime, fake, cfg, max_sessions, |_| {}).await
+}
+
+/// Like [`start_with`], with `tune` adjusting the listener and relay limits.
+pub async fn start_with_limits(
+    runtime: Arc<dyn BrowserRuntime>,
+    fake: Option<FakeRuntime>,
+    cfg: PoolConfig,
+    max_sessions: usize,
+    tune: impl FnOnce(&mut ServerLimits),
+) -> TestServer {
     let dir = tempfile::tempdir().unwrap();
     let api_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ops_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -66,7 +77,10 @@ pub async fn start_with(
         runtime,
         Arc::new(MemoryLeaseStore::new()),
         Arc::new(MemorySnapshotStore::new()),
-        Arc::new(Sealer::new("test0001".into(), [9u8; 32])),
+        Arc::new(Sealer::new(
+            "test0001".into(),
+            &browserx_store::Zeroizing::new([9u8; 32]),
+        )),
         Arc::new(SystemClock),
         EgressPolicy::default(),
         dir.path().join("profiles"),
@@ -81,6 +95,12 @@ pub async fn start_with(
         Arc::new(|| Ok(())),
     )
     .unwrap();
+    let mut limits = ServerLimits {
+        download_root: dir.path().join("downloads"),
+        ..ServerLimits::default()
+    };
+    tune(&mut limits);
+    state.set_limits(limits);
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(serve(
         state.clone(),

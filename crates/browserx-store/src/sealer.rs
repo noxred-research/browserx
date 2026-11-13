@@ -6,15 +6,15 @@ use std::path::Path;
 
 use aes_gcm::aead::consts::U12;
 use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes256Gcm, Nonce};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use browserx_core::snapshot::STATE_FORMAT_VERSION;
 use browserx_core::{Error, Result, Snapshot, SnapshotMeta, StateSnapshot};
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 const KEY_FILE_MAGIC: &str = "browserx-snapshot-key";
 /// Newest key file format this build reads and writes.
@@ -83,6 +83,46 @@ fn crypto(msg: &str) -> Error {
     Error::Crypto(msg.to_owned())
 }
 
+/// Creates `dir` and any missing parents with mode `0700`. Existing directories
+/// keep their mode.
+fn create_private_dirs(dir: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .map_err(|e| Error::Storage(format!("create key directory: {e}")))
+}
+
+/// A key file must belong to the process's user and grant nothing to group or
+/// other (so mode `0600`, or stricter such as `0400`).
+#[cfg(unix)]
+fn check_key_file_access(mode: u32, file_uid: u32, process_uid: u32) -> Result<()> {
+    if file_uid != process_uid {
+        return Err(crypto(
+            "snapshot key file is not owned by the user running BrowserX",
+        ));
+    }
+    if mode & 0o177 != 0 {
+        return Err(crypto(
+            "snapshot key file must be private to its owner (mode 0600); chmod 600",
+        ));
+    }
+    Ok(())
+}
+
+/// The cipher for `key`. The cipher state is zeroized on drop (`aes-gcm`'s
+/// `zeroize` feature); no other copy of the key is made here.
+fn cipher_from(key: &Zeroizing<[u8; KEY_BYTES]>) -> Aes256Gcm {
+    // A reference conversion: no copy of the key is made.
+    let key: &Key<Aes256Gcm> = (&**key).into();
+    Aes256Gcm::new(key)
+}
+
 fn derive_key_id(key: &[u8; KEY_BYTES]) -> String {
     let mut h = Sha256::new();
     h.update(b"browserx-snapshot-key-id");
@@ -93,13 +133,14 @@ fn derive_key_id(key: &[u8; KEY_BYTES]) -> String {
 impl Sealer {
     /// Builds a sealer from raw key material. `key_id` is recorded in snapshot
     /// metadata so keys can be rotated; it must not be derived from secrets.
+    ///
+    /// The key is borrowed so the caller's copy stays the only one and is wiped
+    /// by its own `Zeroizing` wrapper.
     #[must_use]
-    pub fn new(key_id: String, mut key: [u8; KEY_BYTES]) -> Self {
-        let cipher = Aes256Gcm::new(&key.into());
-        key.zeroize();
+    pub fn new(key_id: String, key: &Zeroizing<[u8; KEY_BYTES]>) -> Self {
         Self {
             key_id,
-            cipher,
+            cipher: cipher_from(key),
             retired: Vec::new(),
         }
     }
@@ -107,12 +148,11 @@ impl Sealer {
     /// Adds open-only keys, as `(key_id, key)` pairs. Entries whose id equals the
     /// active key's id or an already retired id are ignored.
     #[must_use]
-    pub fn with_retired(mut self, retired: Vec<(String, [u8; KEY_BYTES])>) -> Self {
-        for (id, mut key) in retired {
+    pub fn with_retired(mut self, retired: Vec<(String, Zeroizing<[u8; KEY_BYTES]>)>) -> Self {
+        for (id, key) in retired {
             if !self.knows_key(&id) {
-                self.retired.push((id, Aes256Gcm::new(&key.into())));
+                self.retired.push((id, cipher_from(&key)));
             }
-            key.zeroize();
         }
         self
     }
@@ -164,17 +204,17 @@ impl Sealer {
     /// The `key_id` is a truncated hash of the key. Never overwrites: an
     /// existing file is a `Conflict`.
     pub fn generate_key_file(path: &Path) -> Result<()> {
-        let mut key = [0u8; KEY_BYTES];
-        rand::rng().fill_bytes(&mut key);
+        let mut key = Zeroizing::new([0u8; KEY_BYTES]);
+        rand::rng().fill_bytes(key.as_mut_slice());
+        let encoded = Zeroizing::new(STANDARD.encode(key.as_slice()));
         let content = Zeroizing::new(format!(
             "{KEY_FILE_MAGIC} v{KEY_FILE_VERSION}\nkey_id={}\nkey={}\n",
             derive_key_id(&key),
-            STANDARD.encode(key)
+            encoded.as_str()
         ));
-        key.zeroize();
+        drop(key);
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| Error::Storage(format!("create key directory: {e}")))?;
+            create_private_dirs(parent)?;
         }
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -197,27 +237,19 @@ impl Sealer {
 
     /// Loads a key file written by [`Self::generate_key_file`].
     ///
-    /// Refuses files readable by "other" users and files declaring a newer
-    /// format version than this build understands.
+    /// Refuses files that are not owned by the current user, files with any
+    /// group or other permission bit (the mode must be `0600` or stricter), and
+    /// files declaring a newer format version than this build understands.
     pub fn from_key_file(path: &Path) -> Result<Self> {
         let file = std::fs::File::open(path)
             .map_err(|e| Error::Crypto(format!("cannot open snapshot key file: {e}")))?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = file
+            use std::os::unix::fs::MetadataExt;
+            let meta = file
                 .metadata()
-                .map_err(|e| Error::Crypto(format!("cannot stat snapshot key file: {e}")))?
-                .permissions()
-                .mode();
-            if mode & 0o007 != 0 {
-                return Err(crypto(
-                    "snapshot key file is accessible by other users; chmod 600",
-                ));
-            }
-            if mode & 0o070 != 0 {
-                tracing::warn!("snapshot key file is accessible by its group; chmod 600 advised");
-            }
+                .map_err(|e| Error::Crypto(format!("cannot stat snapshot key file: {e}")))?;
+            check_key_file_access(meta.mode(), meta.uid(), nix::unistd::geteuid().as_raw())?;
         }
         let mut text = Zeroizing::new(String::new());
         file.take(KEY_FILE_MAX_BYTES + 1)
@@ -268,12 +300,12 @@ impl Sealer {
             return Err(crypto("snapshot key_id must be 8 hex digits"));
         }
         let raw = key.ok_or_else(|| crypto("snapshot key file lacks key"))?;
-        let mut bytes = [0u8; KEY_BYTES];
+        let mut bytes = Zeroizing::new([0u8; KEY_BYTES]);
         if raw.len() != KEY_BYTES {
             return Err(crypto("snapshot key must be exactly 32 bytes"));
         }
         bytes.copy_from_slice(&raw);
-        Ok(Self::new(key_id, bytes))
+        Ok(Self::new(key_id, &bytes))
     }
 
     /// Encrypts `state` and returns the snapshot to store. Fills `meta.size` and
@@ -376,7 +408,7 @@ mod tests {
 
     #[test]
     fn open_refuses_newer_plaintext_format() {
-        let sealer = Sealer::new("00000000".into(), [7u8; 32]);
+        let sealer = Sealer::new("00000000".into(), &Zeroizing::new([7u8; 32]));
         let future = br#"{"format_version":2,"something_new":true}"#;
         let snap = sealer.seal_bytes(meta(), future).unwrap();
         let err = sealer.open(&snap).unwrap_err();
@@ -388,13 +420,14 @@ mod tests {
 
     #[test]
     fn rotation_opens_old_snapshots_with_retired_keys() {
-        let old = Sealer::new("0000000a".into(), [1u8; 32]);
+        let old = Sealer::new("0000000a".into(), &Zeroizing::new([1u8; 32]));
         let old_snap = old.seal(meta(), &StateSnapshot::default()).unwrap();
 
-        let rotated = Sealer::new("0000000b".into(), [2u8; 32]).with_retired(vec![
-            ("0000000a".into(), [1u8; 32]),
-            ("0000000b".into(), [9u8; 32]),
-        ]);
+        let rotated =
+            Sealer::new("0000000b".into(), &Zeroizing::new([2u8; 32])).with_retired(vec![
+                ("0000000a".into(), Zeroizing::new([1u8; 32])),
+                ("0000000b".into(), Zeroizing::new([9u8; 32])),
+            ]);
         // retired key opens old data; the active key seals new data
         assert!(rotated.open(&old_snap).is_ok());
         let new_snap = rotated.seal(meta(), &StateSnapshot::default()).unwrap();
@@ -405,14 +438,14 @@ mod tests {
             matches!(old.open(&new_snap), Err(Error::Crypto(m)) if m.contains("unknown key_id 0000000b"))
         );
         // a key id nobody holds
-        let stranger = Sealer::new("0000000c".into(), [3u8; 32]);
+        let stranger = Sealer::new("0000000c".into(), &Zeroizing::new([3u8; 32]));
         let foreign = stranger.seal(meta(), &StateSnapshot::default()).unwrap();
         assert!(
             matches!(rotated.open(&foreign), Err(Error::Crypto(m)) if m == "unknown key_id 0000000c")
         );
         // a retired id with the wrong key material fails authentication, not lookup
-        let wrong = Sealer::new("0000000b".into(), [2u8; 32])
-            .with_retired(vec![("0000000a".into(), [7u8; 32])]);
+        let wrong = Sealer::new("0000000b".into(), &Zeroizing::new([2u8; 32]))
+            .with_retired(vec![("0000000a".into(), Zeroizing::new([7u8; 32]))]);
         assert!(
             matches!(wrong.open(&old_snap), Err(Error::Crypto(m)) if m.contains("authentication"))
         );
@@ -436,9 +469,30 @@ mod tests {
         assert!(current.add_retired_key_file(&new_path).is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn key_file_access_requires_owner_and_private_mode() {
+        assert!(check_key_file_access(0o100_600, 1000, 1000).is_ok());
+        assert!(check_key_file_access(0o100_400, 1000, 1000).is_ok());
+        // group- or other-accessible, executable
+        for mode in [0o100_640, 0o100_660, 0o100_604, 0o100_644, 0o100_700] {
+            assert!(
+                matches!(
+                    check_key_file_access(mode, 1000, 1000),
+                    Err(Error::Crypto(_))
+                ),
+                "{mode:o}"
+            );
+        }
+        // owned by someone else, however private
+        assert!(
+            matches!(check_key_file_access(0o100_600, 0, 1000), Err(Error::Crypto(m)) if m.contains("not owned"))
+        );
+    }
+
     #[test]
     fn seal_refuses_newer_state_format() {
-        let sealer = Sealer::new("00000000".into(), [7u8; 32]);
+        let sealer = Sealer::new("00000000".into(), &Zeroizing::new([7u8; 32]));
         let state = StateSnapshot {
             format_version: STATE_FORMAT_VERSION + 1,
             ..Default::default()

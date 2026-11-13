@@ -23,6 +23,7 @@ pub use lease_sqlite::SqliteLeaseStore;
 pub use sealer::Sealer;
 pub use snapshot_file::FileSnapshotStore;
 pub use snapshot_memory::MemorySnapshotStore;
+pub use zeroize::Zeroizing;
 
 /// Largest sealed snapshot (nonce, ciphertext and tag) a snapshot store accepts.
 pub const MAX_SEALED_BYTES: usize = 64 * 1024 * 1024;

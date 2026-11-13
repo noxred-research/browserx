@@ -12,7 +12,7 @@ use browserx_core::{
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use time::OffsetDateTime;
 
-use crate::common::{check_cas, micros};
+use crate::common::{check_cas, micros, scrubbed_if_terminal};
 
 /// Ordered schema migrations. Never edit an applied entry; append a new one.
 const MIGRATIONS: &[(i64, &str)] = &[(
@@ -69,7 +69,11 @@ fn decode(id: &str, json: &str) -> Result<SessionLease> {
 ///
 /// **Sensitive content:** a lease embeds its session spec, including any
 /// upstream proxy password, because recovery must relaunch the forwarder. The
-/// database file is created with mode `0600`; keep the state directory private.
+/// password is removed when a lease turns terminal (`lost`, `closed`), and
+/// `secure_delete` makes SQLite overwrite freed content so the old value does
+/// not linger in the file. The database file (and its WAL/shared-memory
+/// siblings) are forced to mode `0600` on every open; keep the state directory
+/// private.
 #[derive(Clone)]
 pub struct SqliteLeaseStore {
     conn: Arc<Mutex<Connection>>,
@@ -91,6 +95,8 @@ impl SqliteLeaseStore {
         }
         create_private_file(path)?;
         let mut conn = Connection::open(path).map_err(|e| db_err(&e))?;
+        conn.pragma_update(None, "secure_delete", "ON")
+            .map_err(|e| db_err(&e))?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(|e| db_err(&e))?;
         let mode: String = conn
@@ -104,6 +110,8 @@ impl SqliteLeaseStore {
         conn.pragma_update(None, "synchronous", "FULL")
             .map_err(|e| db_err(&e))?;
         migrate(&mut conn, micros(clock.now()))?;
+        scrub_stored_terminal_leases(&mut conn)?;
+        restrict_sidecar_files(path)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             clock,
@@ -138,6 +146,8 @@ impl SqliteLeaseStore {
     }
 }
 
+/// Creates the database file with mode `0600`, or narrows an existing one to
+/// `0600` (the creation mode alone would leave a pre-existing wider file alone).
 fn create_private_file(path: &Path) -> Result<()> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(false);
@@ -146,9 +156,77 @@ fn create_private_file(path: &Path) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    opts.open(path)
-        .map(|_| ())
-        .map_err(|e| Error::Storage(format!("create database file: {e}")))
+    let file = opts
+        .open(path)
+        .map_err(|e| Error::Storage(format!("create database file: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| Error::Storage(format!("restrict database file mode: {e}")))?;
+    }
+    drop(file);
+    Ok(())
+}
+
+/// SQLite creates the `-wal` and `-shm` files with the main file's mode; narrow
+/// any that already exist from an earlier, wider-moded run.
+fn restrict_sidecar_files(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for suffix in ["-wal", "-shm"] {
+            let mut name = path.as_os_str().to_owned();
+            name.push(suffix);
+            match std::fs::set_permissions(&name, std::fs::Permissions::from_mode(0o600)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(Error::Storage(format!(
+                        "restrict database sidecar file mode: {e}"
+                    )));
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Removes proxy passwords from terminal leases written by a build that kept
+/// them (a lease turns terminal at most once, so this normally finds nothing).
+fn scrub_stored_terminal_leases(conn: &mut Connection) -> Result<()> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| db_err(&e))?;
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT id, lease_json FROM leases
+                  WHERE status IN ('lost', 'closed') AND lease_json LIKE '%\"password\":\"%'",
+            )
+            .map_err(|e| db_err(&e))?;
+        let mapped = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| db_err(&e))?;
+        mapped
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| db_err(&e))?
+    };
+    for (id, json) in rows {
+        let lease = decode(&id, &json)?;
+        if let Some(clean) = scrubbed_if_terminal(&lease) {
+            let json = serde_json::to_string(&clean)
+                .map_err(|e| Error::Internal(format!("encode lease: {e}")))?;
+            tx.execute(
+                "UPDATE leases SET lease_json = ?1 WHERE id = ?2",
+                params![json, id],
+            )
+            .map_err(|e| db_err(&e))?;
+        }
+    }
+    tx.commit().map_err(|e| db_err(&e))
 }
 
 fn migrate(conn: &mut Connection, now_us: i64) -> Result<()> {
@@ -194,7 +272,8 @@ impl LeaseStore for SqliteLeaseStore {
         let status = status_str(lease.status);
         let generation = generation_i64(lease.generation)?;
         let created = micros(lease.created_at);
-        let json = serde_json::to_string(lease)
+        let scrubbed = scrubbed_if_terminal(lease);
+        let json = serde_json::to_string(scrubbed.as_ref().unwrap_or(lease))
             .map_err(|e| Error::Internal(format!("encode lease: {e}")))?;
         self.run(move |conn, now| {
             conn.execute(
@@ -240,7 +319,8 @@ impl LeaseStore for SqliteLeaseStore {
         let status = status_str(lease.status);
         let expected_i = generation_i64(expected)?;
         let new_i = generation_i64(lease.generation)?;
-        let json = serde_json::to_string(lease)
+        let scrubbed = scrubbed_if_terminal(lease);
+        let json = serde_json::to_string(scrubbed.as_ref().unwrap_or(lease))
             .map_err(|e| Error::Internal(format!("encode lease: {e}")))?;
         let candidate = lease.clone();
         self.run(move |conn, now| {

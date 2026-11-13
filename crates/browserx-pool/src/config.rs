@@ -5,8 +5,12 @@ use std::time::Duration;
 
 use browserx_core::{Error, Result};
 
+/// Longest duration any setting may take (ten years). Larger values only
+/// overflow time arithmetic; they never mean anything useful.
+pub const MAX_CONFIG_DURATION: Duration = Duration::from_secs(10 * 365 * 24 * 3600);
+
 /// Limits and intervals the scheduler enforces. Every duration is positive and
-/// every count is bounded; [`PoolConfig::validate`] rejects anything else.
+/// bounded, and every count is bounded; [`PoolConfig::validate`] rejects anything else.
 #[derive(Clone, Debug)]
 pub struct PoolConfig {
     /// Maximum number of browser processes (dedicated + shared, including ones being launched or torn down).
@@ -112,6 +116,26 @@ impl PoolConfig {
             || self.operation_timeout.is_zero()
         {
             return bad("durations must be positive");
+        }
+        if [
+            self.queue_timeout,
+            self.browser_max_age,
+            self.default_ttl,
+            self.max_ttl,
+            self.max_lifetime,
+            self.default_idle_timeout,
+            self.snapshot_interval,
+            self.terminal_retention,
+            self.probe_interval,
+            self.probe_timeout,
+            self.recovery_backoff,
+            self.maintenance_interval,
+            self.operation_timeout,
+        ]
+        .iter()
+        .any(|d| *d > MAX_CONFIG_DURATION)
+        {
+            return bad("durations must not exceed ten years");
         }
         if self.default_ttl > self.max_ttl {
             return bad("default_ttl exceeds max_ttl");

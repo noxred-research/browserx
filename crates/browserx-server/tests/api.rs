@@ -434,7 +434,7 @@ async fn handoff_rotates_token_and_closes_old_relay() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == 403),
+        matches!(&err, tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == 401),
         "{err}"
     );
     let (code, _) = call(
@@ -465,7 +465,7 @@ async fn handoff_rotates_token_and_closes_old_relay() {
 }
 
 #[tokio::test]
-async fn dedicated_relay_is_a_transparent_byte_relay() {
+async fn dedicated_relay_forwards_everything_except_what_endangers_the_host() {
     let s = start().await;
     let created = s.create(json!({})).await;
     let id = created["session"]["session_id"]
@@ -475,11 +475,50 @@ async fn dedicated_relay_is_a_transparent_byte_relay() {
     let (mut ws, _) = tokio_tungstenite::connect_async(created["cdp_url"].as_str().unwrap())
         .await
         .unwrap();
-    // Anything goes through, including methods a shared session would refuse.
-    let v = rpc(&mut ws, 1, "Browser.close", json!({"a": 1})).await;
+    // Ordinary commands go through unchanged, including ones a shared session refuses.
+    let v = rpc(&mut ws, 1, "Browser.setWindowBounds", json!({"a": 1})).await;
     assert_eq!(v["result"]["params"], json!({"a": 1}));
     let v = rpc(&mut ws, 2, "Target.createBrowserContext", json!({})).await;
     assert_eq!(v["result"]["echo"], "Target.createBrowserContext");
+    // Host-protection refusals are answered by the relay and never reach the browser.
+    for (n, (method, params)) in [
+        ("Browser.close", json!({})),
+        (
+            "Target.createBrowserContext",
+            json!({"proxyServer": "direct://"}),
+        ),
+        ("Page.navigate", json!({"url": "file:///etc/hostname"})),
+        ("Tracing.start", json!({})),
+        ("DOM.setFileInputFiles", json!({"files": ["/etc/hostname"]})),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let r = rpc(&mut ws, 10 + n as u64, method, params.clone()).await;
+        assert_eq!(r["error"]["code"], -32000, "{method}: {r}");
+    }
+    let browser = s.fake.as_ref().unwrap().browsers()[0].clone();
+    let reached: Vec<String> = browser.calls().iter().map(|c| c.method.clone()).collect();
+    for banned in [
+        "Browser.close",
+        "Page.navigate",
+        "Tracing.start",
+        "DOM.setFileInputFiles",
+    ] {
+        assert!(
+            !reached.iter().any(|m| m == banned),
+            "{banned} reached the browser"
+        );
+    }
+    assert_eq!(
+        browser
+            .calls()
+            .iter()
+            .filter(|c| c.method == "Target.createBrowserContext")
+            .count(),
+        1,
+        "only the proxy-free context request reaches the browser"
+    );
 
     let (_, got) = call(&s, Method::GET, &format!("/v1/sessions/{id}"), None, None).await;
     assert_eq!(got["session"]["status"], "active");
@@ -519,7 +558,7 @@ async fn relay_rejects_bad_credentials_and_non_websocket_requests() {
     let bad = format!("{}/cdp/{id}/bxt_wrong", s.ws);
     let err = tokio_tungstenite::connect_async(&bad).await.unwrap_err();
     assert!(
-        matches!(&err, tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == 403),
+        matches!(&err, tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == 401),
         "{err}"
     );
     let missing = format!(
@@ -532,7 +571,7 @@ async fn relay_rejects_bad_credentials_and_non_websocket_requests() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == 404),
+        matches!(&err, tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == 401),
         "{err}"
     );
     // A plain GET (no upgrade) is not a valid relay request.
