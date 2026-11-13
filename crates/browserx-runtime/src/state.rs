@@ -30,6 +30,11 @@ const ENTRY_OVERHEAD: usize = 8;
 const MAX_COOKIES: usize = 20_000;
 /// Pages recorded and reopened per snapshot.
 const MAX_OPEN_URLS: usize = 64;
+/// The document answered for the seeded origin: empty, and it declares no icon, so the browser
+/// has no reason to look for a favicon on the site (base64 of
+/// `<!doctype html><link rel="icon" href="data:,">`).
+const EMPTY_PAGE_BASE64: &str = "PCFkb2N0eXBlIGh0bWw+PGxpbmsgcmVsPSJpY29uIiBocmVmPSJkYXRhOiwiPg==";
+
 /// Deadline for the interception handshake that seeds one origin.
 const ORIGIN_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(20);
 /// Attempts (100 ms apart) to write storage once the seeded page is current.
@@ -483,14 +488,18 @@ async fn seed_origin(
     let session = attach(cdp, target_id).await?;
     let page_url = format!("{origin}/");
     let mut events = cdp.events();
+    // Intercept every request to the origin, not only the page: anything else the browser
+    // issues for the blank page (a favicon, for one) must not reach the site either.
     cdp.call(
         "Fetch.enable",
-        json!({ "patterns": [{ "urlPattern": page_url, "requestStage": "Request" }] }),
+        json!({ "patterns": [{ "urlPattern": format!("{origin}/*"), "requestStage": "Request" }] }),
         Some(&session),
     )
     .await?;
 
-    let fulfil = async {
+    // Answers the page with an empty document that declares no icon, and refuses every other
+    // request to the origin. It runs for as long as the seeding does and ends only on an error.
+    let answer = async {
         loop {
             match events.recv().await {
                 Ok(event)
@@ -503,22 +512,34 @@ async fn seed_origin(
                         .and_then(Value::as_str)
                         .ok_or_else(|| Error::Browser("requestPaused without requestId".into()))?
                         .to_owned();
-                    cdp.call(
-                        "Fetch.fulfillRequest",
-                        json!({
-                            "requestId": request_id,
-                            "responseCode": 200,
-                            "responseHeaders": [{ "name": "Content-Type", "value": "text/html" }],
-                            "body": "",
-                        }),
-                        Some(&session),
-                    )
-                    .await?;
-                    return Ok::<(), Error>(());
+                    let is_page = event.params.pointer("/request/url").and_then(Value::as_str)
+                        == Some(page_url.as_str());
+                    if is_page {
+                        cdp.call(
+                            "Fetch.fulfillRequest",
+                            json!({
+                                "requestId": request_id,
+                                "responseCode": 200,
+                                "responseHeaders": [{ "name": "Content-Type", "value": "text/html" }],
+                                "body": EMPTY_PAGE_BASE64,
+                            }),
+                            Some(&session),
+                        )
+                        .await?;
+                    } else {
+                        // The page is gone or closing when this fails; nothing is left to refuse.
+                        let _ = cdp
+                            .call(
+                                "Fetch.failRequest",
+                                json!({ "requestId": request_id, "errorReason": "BlockedByClient" }),
+                                Some(&session),
+                            )
+                            .await;
+                    }
                 }
                 Ok(_) | Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => {
-                    return Err(Error::Browser(
+                    return Err::<(), Error>(Error::Browser(
                         "event stream closed while seeding storage".into(),
                     ));
                 }
@@ -526,13 +547,14 @@ async fn seed_origin(
         }
     };
     let navigate = cdp.call("Page.navigate", json!({ "url": page_url }), Some(&session));
-    let (navigated, fulfilled) = tokio::time::timeout(ORIGIN_NAVIGATION_TIMEOUT, async {
-        tokio::join!(navigate, fulfil)
+    let navigated = tokio::time::timeout(ORIGIN_NAVIGATION_TIMEOUT, async {
+        tokio::select! {
+            navigated = navigate => navigated.map_err(Error::from),
+            failed = answer => failed.map(|()| Value::Null),
+        }
     })
     .await
-    .map_err(|_| Error::Timeout("seeding an origin's storage timed out".into()))?;
-    let navigated = navigated?;
-    fulfilled?;
+    .map_err(|_| Error::Timeout("seeding an origin's storage timed out".into()))??;
     if let Some(text) = navigated.get("errorText").and_then(Value::as_str) {
         return Err(Error::Browser(format!(
             "could not open the origin to seed storage: {text}"
