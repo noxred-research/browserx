@@ -88,6 +88,10 @@ Chromium's own sandbox stays on unless a launch profile disables it. Running bro
 
 By default the forwarder refuses to connect to private, loopback, link-local, carrier-grade NAT, multicast and cloud-metadata addresses, so a page, a redirect or a DNS answer cannot turn the browser into a pivot into your network. See [egress](egress.md) for the rules, the allow-list and the SOCKS5-with-remote-DNS caveat.
 
+## Agent actions
+
+The relay policy above applies to every CDP client, an AI agent included. The MCP server adds a separate, deterministic layer **above** it for agents: scope checks on every top-level request, an action gate (action classes and a profile, a signed engagement manifest, signed scope grants, a per-session Rule of Two ledger and human approvals) and a hash-chained audit log. That layer narrows what an agent may do; it does not replace the relay policy and it does not make a hostile page trustworthy. A model advises and never authorizes. See [AI/LLM-native operation](ai-llm-native.md) and the [MCP server guide](../guides/mcp.md#the-action-gate).
+
 ## Ownership
 
 Sessions belong to the API key name that created them. List, get, attach, renew, handoff, snapshot and release are scoped to that owner, plus the token requirement for controller operations. An API key sees only its own sessions. Per-key `max_sessions` bounds one owner's footprint.

@@ -166,6 +166,10 @@ impl Conn {
         number: u32,
         info: &RefInfo,
     ) -> ToolResult<()> {
+        #[cfg(feature = "fault-injection")]
+        if crate::faults::active(crate::faults::Fault::StaleRef) {
+            return Ok(());
+        }
         let stale = |why: &str| {
             ToolError::browser(format!(
                 "ref e{number} is stale ({why}). Call page_snapshot and use the new ref."
@@ -201,7 +205,7 @@ impl Conn {
         Ok(())
     }
 
-    async fn resolve(&self, tab: &TabRef, reference: &str) -> ToolResult<RefInfo> {
+    pub(crate) async fn resolve(&self, tab: &TabRef, reference: &str) -> ToolResult<RefInfo> {
         let number = parse_ref(reference).ok_or_else(|| {
             ToolError::invalid(format!(
                 "{reference:?} is not an element ref: use the eN values from page_snapshot"

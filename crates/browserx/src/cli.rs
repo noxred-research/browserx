@@ -60,6 +60,11 @@ pub enum Command {
     /// and explain BrowserX within limits you set. Also: `mcp check`, `mcp audit verify`,
     /// `mcp token new`.
     Mcp(browserx_mcp::McpArgs),
+    /// Agent safety and reliability evaluation.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
     /// Talk to a running server.
     Session {
         #[command(flatten)]
@@ -67,6 +72,15 @@ pub enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+}
+
+/// `agent` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum AgentCommand {
+    /// Run a suite of scripted attacks and reliability cases against loopback fixtures with a
+    /// real browser, and write a report. Exits 0 only when every case passes and no attack got
+    /// through, 1 otherwise and 2 when it cannot run (for example without Chromium).
+    Eval(crate::agent_eval::EvalArgs),
 }
 
 /// `config` subcommands.

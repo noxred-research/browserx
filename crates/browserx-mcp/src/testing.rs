@@ -33,6 +33,7 @@ pub(crate) async fn rpc(
             &Transport {
                 name: "stdio",
                 remote: None,
+                principal: None,
             },
         )
         .await

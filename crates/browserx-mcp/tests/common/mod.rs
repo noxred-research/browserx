@@ -16,6 +16,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
+pub mod site;
+
 /// A synthetic BrowserX API key.
 pub const KEY: &str = "bxk_test_mcp_not_a_real_key";
 

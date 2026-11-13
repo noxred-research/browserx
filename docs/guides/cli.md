@@ -1,6 +1,6 @@
 # CLI reference
 
-`browserx` is one binary with three kinds of commands: the worker (`serve`), local tools (`config`, `keys`, `snapshot-key`, `doctor`) and clients of a running worker (`session`).
+`browserx` is one binary with four kinds of commands: the worker (`serve`), local tools (`config`, `keys`, `snapshot-key`, `doctor`), clients of a running worker (`session`) and the AI-agent tools (`mcp`, `agent eval`).
 
 ```text
 browserx [--log-format json|text] <command>
@@ -169,6 +169,63 @@ browserx session release <session-id> [--generation <n>]
 ```
 
 Releases the session. For a snapshot session a final snapshot is written first. The lease token is optional: the owning API key may release without it.
+
+## `browserx mcp`
+
+Serves the [MCP server](mcp.md) and holds its operator tools.
+
+```sh
+browserx mcp --config mcp.toml                      # MCP over stdio
+browserx mcp --config mcp.toml --http 127.0.0.1:7692   # streamable HTTP
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--config <path>`, `-c` | The MCP configuration (TOML); also read from `BROWSERX_MCP_CONFIG`. Required to serve |
+| `--http [<addr>]` | Serve streamable HTTP instead of stdio. Without an address, `mcp.http.listen` is used. Needs `mcp.http.token_sha256`; a non-loopback address logs a warning |
+| `--stdio` | With `--http`: serve stdio as well |
+
+The server stops on `SIGINT` or `SIGTERM`, or when stdin closes (stdio only), and releases the sessions it created when `mcp.release_on_exit` is set.
+
+| Utility | What it does |
+| --- | --- |
+| `browserx mcp check <path>` | Validates a configuration and prints the capabilities, the tools it enables, the browsing scope, the audit path, the safety profile and Rule of Two mode, the manifest and grant paths and whether a model is configured |
+| `browserx mcp token new` | Prints an HTTP bearer token (`bxm_...`) **once** and the `[mcp.http] token_sha256` line that authorizes it |
+| `browserx mcp audit verify <path>` | Recomputes the audit log's hash chain; exits non-zero at the first edited, removed or reordered entry and prints the last hash to store off the host |
+| `browserx mcp operator-key new <key_id>` | Prints a new operator key line, `key_id = <64 hex digits>`, **once**; append it to the key file (mode `0600`) named by `[operator] keys_file` |
+| `browserx mcp manifest verify <path> --keys <file> [--signature <file>]` | Checks an engagement manifest and its detached signature offline and prints its engagement, operator, signing key, digest, impact, hosts and whether it is active now; exits non-zero when the signature is missing or invalid |
+| `browserx mcp manifest sign <path> --keys <file> [--key-id <id>]` | Checks that the manifest parses and writes `<path>.sig`. `--key-id` is needed when the key file holds several keys |
+| `browserx mcp grant verify <path> --keys <file> [--signature <file>]` | Like `manifest verify`, for a scope grant |
+| `browserx mcp grant sign <path> --keys <file> [--key-id <id>]` | Like `manifest sign`, for a scope grant or a proposal a model wrote after your review |
+| `browserx mcp approvals list --config <path>` | Lists the pending out-of-band approvals: id, tool, action class, origin, reasons and whether each is already approved |
+| `browserx mcp approvals approve <id> --config <path> [--key-id <id>]` | Signs one pending approval with the operator key; the client then retries with `approval_id` |
+
+See the [MCP guide](mcp.md#the-action-gate) for what the manifest, grant and approval files mean.
+
+## `browserx agent eval`
+
+Runs an adversarial evaluation of the MCP server's enforcement layers with a real browser and reports, per layer, what was attempted, what was blocked and what escaped.
+
+```sh
+browserx agent eval --suite <path> --report report.json --seed 7
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--suite <path>` | The suite to run, described by a versioned `suite.json` |
+| `--report <path>` | Where to write the report (JSON) |
+| `--seed <n>` | Fixes the order of the cases, so a run can be repeated exactly |
+| `--mutate <layer>` | Only in a build with the `fault-injection` feature, which no release build enables: switches one enforcement layer off for a harness self-test. The layers are `scope`, `grant`, `ledger`, `classifier`, `stale_ref` and `redaction`. A run with a layer off is expected to report escapes and fail: that is how the suite proves it notices |
+
+The command starts an offline fixture server on the loopback interface (no external network is used) and launches a real Chromium, found the way [`browserx doctor`](#browserx-doctor) finds it. When Chromium is missing the command exits with status `2` and a message, so a CI lane cannot pass without a browser.
+
+The report is JSON. Besides the individual case results it has a matrix per enforcement layer with the numbers `attempted`, `blocked` and `escaped`.
+
+| Exit status | Meaning |
+| --- | --- |
+| `0` | Every case passed and there was no deterministic escape |
+| `2` | Chromium is missing |
+| other non-zero | A case failed, a deterministic layer let an attempt escape, or the run could not complete; the message and the report say which |
 
 ## Exit status
 

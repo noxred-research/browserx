@@ -41,7 +41,11 @@ pub(super) async fn prune(ctx: &Ctx, listed: &[Value]) {
     }
 }
 
-pub(super) async fn create_session(ctx: &Arc<Ctx>, args: &Args) -> ToolResult {
+pub(super) async fn create_session(
+    ctx: &Arc<Ctx>,
+    call: &super::Call<'_>,
+    args: &Args,
+) -> ToolResult {
     if ctx.registry.created().len() >= ctx.cfg.sessions.max_tracked
         && let Ok(listed) = ctx.backend.list_sessions(None).await
     {
@@ -120,10 +124,27 @@ pub(super) async fn create_session(ctx: &Arc<Ctx>, args: &Args) -> ToolResult {
     } else {
         out
     };
+    let reason = match (
+        args.str("persistence"),
+        args.str("profile_id"),
+        args.str("proxy_route"),
+    ) {
+        (Some("snapshot" | "profile"), _, _) => {
+            Some("a session with persistent browser state was created")
+        }
+        (_, Some(_), _) => Some("a session that reuses a persistent identity was created"),
+        (_, _, Some(_)) => Some("a session behind an upstream proxy route was created"),
+        _ => None,
+    };
+    if let Some(reason) = reason {
+        ctx.ledger
+            .mark(&call.handle, crate::ledger::Flag::B, reason);
+    }
     ctx.registry.insert(Managed {
         id,
         token: created.token,
         adopted: false,
+        sensitive: reason.map(str::to_owned),
     });
     Ok(out)
 }
@@ -207,6 +228,7 @@ pub(super) async fn handoff_session(ctx: &Arc<Ctx>, args: &Args) -> ToolResult {
         id,
         token: created.token,
         adopted: managed.adopted,
+        sensitive: managed.sensitive,
     });
     Ok(out)
 }

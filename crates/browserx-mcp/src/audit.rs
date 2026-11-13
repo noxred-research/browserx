@@ -31,6 +31,9 @@ pub struct Caller {
     pub client_name: Option<String>,
     /// The peer address of an HTTP call.
     pub remote: Option<String>,
+    /// The authenticated principal (`stdio`, or `http:` and a digest prefix of the token).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
 }
 
 /// The accountability fields recorded in every entry.
@@ -42,6 +45,12 @@ pub struct Context {
     pub operator: Option<String>,
     /// Why the testing is authorized.
     pub authorization_note: Option<String>,
+    /// SHA-256 of the signed engagement manifest in force.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_digest: Option<String>,
+    /// SHA-256 of the scope grant in force.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_digest: Option<String>,
 }
 
 /// The kind of audit record.
@@ -78,6 +87,10 @@ pub struct Entry<'a> {
     pub detail: Option<&'a str>,
     /// Wall time of the call in milliseconds.
     pub duration_ms: Option<u64>,
+    /// Per-call facts recorded with the context: the ledger flags `{A,B,C}`, the action class,
+    /// the reason code of a refusal, the trace id. Merged into the entry's `context`, so the
+    /// hash chain covers them.
+    pub extra: Option<&'a Value>,
 }
 
 /// The audit log writer.
@@ -248,7 +261,12 @@ impl Audit {
     pub fn record(&self, entry: &Entry<'_>) -> io::Result<u64> {
         let arguments = self.redactor.redacted(entry.arguments);
         let caller = serde_json::to_value(entry.caller).unwrap_or(Value::Null);
-        let context = serde_json::to_value(&self.context).unwrap_or(Value::Null);
+        let mut context = serde_json::to_value(&self.context).unwrap_or(Value::Null);
+        if let (Some(map), Some(Value::Object(extra))) = (context.as_object_mut(), entry.extra) {
+            for (key, value) in extra {
+                map.insert(key.clone(), self.redactor.redacted(value));
+            }
+        }
         let detail = self.redactor.text(entry.detail.unwrap_or(""));
         let mut file = Self::locked_file(&self.path)?;
         let (last_seq, prev) = Self::tail_state(&mut file)?;
@@ -394,6 +412,7 @@ mod tests {
             transport: "stdio",
             client_name: Some("tester".into()),
             remote: None,
+            principal: None,
         }
     }
 
@@ -402,6 +421,8 @@ mod tests {
             engagement: Some("ENG-1".into()),
             operator: Some("alice".into()),
             authorization_note: Some("ticket 7".into()),
+            manifest_digest: None,
+            grant_digest: None,
         }
     }
 
@@ -415,6 +436,7 @@ mod tests {
                 outcome,
                 detail: Some("backend answered 503"),
                 duration_ms: Some(3),
+                extra: None,
             })
             .unwrap()
     }
@@ -506,6 +528,7 @@ mod tests {
                 outcome: "intent",
                 detail: None,
                 duration_ms: None,
+                extra: None,
             });
             assert!(result.is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);

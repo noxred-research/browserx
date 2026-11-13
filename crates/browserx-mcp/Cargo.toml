@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 browserx-core.workspace = true
 browserx-cdp.workspace = true
+aes-gcm.workspace = true
 axum.workspace = true
 base64.workspace = true
 clap.workspace = true
@@ -36,6 +37,10 @@ browserx-server.workspace = true
 browserx-store.workspace = true
 nix.workspace = true
 tempfile.workspace = true
+
+[features]
+# Test-only: lets an evaluation switch one enforcement layer off. Never enabled in releases.
+fault-injection = []
 
 [lints]
 workspace = true

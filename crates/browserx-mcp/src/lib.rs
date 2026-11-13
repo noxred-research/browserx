@@ -23,26 +23,36 @@
 
 #![deny(missing_docs)]
 
+pub mod approvals;
 mod assess;
 pub mod audit;
 mod backend;
 mod browse;
+pub mod classifier;
 mod cli;
 pub mod config;
+pub mod crypto;
 mod ctx;
 mod error;
 mod explain;
+#[cfg(feature = "fault-injection")]
+pub mod faults;
+mod gate;
+pub mod grants;
 pub mod http;
+pub mod ledger;
 mod llm;
+pub mod manifest;
 mod metrics;
 mod prompts;
 pub mod protocol;
 mod redact;
 mod resources;
 mod safety;
-mod schema;
+pub mod schema;
 pub mod server;
 mod sessions;
+mod shots;
 pub mod stdio;
 #[cfg(test)]
 mod testing;

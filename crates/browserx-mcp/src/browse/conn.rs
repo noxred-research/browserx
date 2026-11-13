@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 
 use super::Limits;
 use super::ax::Refs;
+use super::snapshot::SnapshotStore;
 use crate::error::{ToolError, ToolResult};
 use crate::safety::Scope;
 
@@ -67,10 +68,12 @@ pub(super) struct Tab {
     pub title: String,
     pub main_frame: Option<String>,
     pub loading: bool,
-    pub blocked: Option<String>,
+    /// Origin and reason code of the last main-document request the scope blocked.
+    pub blocked: Option<(String, &'static str)>,
     pub loads: u64,
     pub navigations: u64,
     pub refs: Refs,
+    pub snaps: SnapshotStore,
     pub net: VecDeque<NetEntry>,
     pub console: VecDeque<ConsoleEntry>,
 }
@@ -190,11 +193,20 @@ impl Shared {
                 .main_frame
                 .as_deref()
                 .is_none_or(|main| p["frameId"].as_str() == Some(main));
-        let allow = !main_document || self.scope.allows_navigation(url);
-        if !allow {
-            tab.blocked = Some(url::Url::parse(url).map_or_else(
-                |_| "an unparsable URL".to_owned(),
-                |u| u.origin().ascii_serialization(),
+        let refusal = if main_document {
+            let method = p["request"]["method"].as_str().unwrap_or("GET");
+            self.scope.navigation_refusal_as(method, url)
+        } else {
+            None
+        };
+        let allow = refusal.is_none();
+        if let Some(refusal) = refusal {
+            tab.blocked = Some((
+                url::Url::parse(url).map_or_else(
+                    |_| "an unparsable URL".to_owned(),
+                    |u| u.origin().ascii_serialization(),
+                ),
+                refusal.code(),
             ));
         }
         Some(Paused {
@@ -351,6 +363,7 @@ impl Shared {
                     tab.url = frame["url"].as_str().unwrap_or("").to_owned();
                     tab.navigations += 1;
                     tab.refs.clear();
+                    tab.snaps.clear();
                 }
             }
             "Page.navigatedWithinDocument" => {
@@ -429,11 +442,14 @@ impl Drop for Conn {
 }
 
 /// The refusal for a navigation the scope guard stopped before it left the browser.
-pub(super) fn blocked_error(origin: &str) -> ToolError {
-    ToolError::refused(format!(
-        "the page tried to load {origin}, which is outside the authorized scope: the request was blocked before it was sent \
-         and the tab stays on its previous page"
-    ))
+pub(super) fn blocked_error(origin: &str, code: &str) -> ToolError {
+    ToolError::refused_with(
+        code,
+        format!(
+            "the page tried to load {origin}, which is outside the authorized scope: the request was blocked before it was sent \
+             and the tab stays on its previous page"
+        ),
+    )
 }
 
 fn map_cdp(error: browserx_cdp::CdpError) -> ToolError {
@@ -502,6 +518,14 @@ impl Conn {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.client.is_closed()
+    }
+
+    /// Forgets every element reference and stored snapshot of every tab.
+    pub(super) fn forget_refs(&self) {
+        for tab in &mut self.shared.state().tabs {
+            tab.refs.clear();
+            tab.snaps.clear();
+        }
     }
 
     /// Closes the connection.
@@ -748,19 +772,29 @@ impl Conn {
         expression: &str,
         timeout_ms: u64,
     ) -> ToolResult<Value> {
-        let result = self
-            .call(
-                tab,
-                "Runtime.evaluate",
-                json!({
-                    "expression": expression,
-                    "returnByValue": true,
-                    "awaitPromise": true,
-                    "timeout": timeout_ms,
-                    "userGesture": false,
-                }),
-            )
-            .await?;
+        self.eval_in(tab, expression, timeout_ms, None).await
+    }
+
+    /// Evaluates a fixed expression in the execution context `context` (the page's main world
+    /// when `None`) and returns its value.
+    pub(super) async fn eval_in(
+        &self,
+        tab: &TabRef,
+        expression: &str,
+        timeout_ms: u64,
+        context: Option<i64>,
+    ) -> ToolResult<Value> {
+        let mut params = json!({
+            "expression": expression,
+            "returnByValue": true,
+            "awaitPromise": true,
+            "timeout": timeout_ms,
+            "userGesture": false,
+        });
+        if let Some(context) = context {
+            params["contextId"] = json!(context);
+        }
+        let result = self.call(tab, "Runtime.evaluate", params).await?;
         if let Some(details) = result.get("exceptionDetails") {
             let text = details["exception"]["description"]
                 .as_str()
@@ -793,8 +827,8 @@ impl Conn {
         min_wait: Duration,
     ) -> ToolResult<(String, bool)> {
         let settled = self.wait_settled(tab, min_wait).await;
-        if let Some(origin) = self.take_blocked(tab) {
-            return Err(blocked_error(&origin));
+        if let Some((origin, code)) = self.take_blocked(tab) {
+            return Err(blocked_error(&origin, code));
         }
         let url = self.current_url(tab).await?;
         if url.starts_with("chrome-error://") {
@@ -814,7 +848,7 @@ impl Conn {
     }
 
     /// The origin of a navigation the scope guard blocked since the last call, if any.
-    pub(super) fn take_blocked(&self, tab: &TabRef) -> Option<String> {
+    pub(super) fn take_blocked(&self, tab: &TabRef) -> Option<(String, &'static str)> {
         self.shared
             .state()
             .tab_mut(tab.num)
@@ -1065,6 +1099,56 @@ mod tests {
     }
 
     #[test]
+    fn a_protected_post_is_held_back_whatever_started_it() {
+        let manifest = crate::manifest::Manifest::parse(
+            "[engagement]\nid = \"e\"\noperator = \"o\"\nauthorization_note = \"n\"\n\
+             [[scope]]\nhost = \"site.test\"\nmode = \"attack\"\n\
+             [[protected]]\npattern = \"POST /delete\"\nmode = \"blocked\"\n",
+        )
+        .unwrap();
+        let scope = Scope::new(
+            vec!["http://site.test".into()],
+            true,
+            crate::config::Window::default(),
+        )
+        .with_manifest(Arc::new(crate::manifest::Loaded {
+            manifest,
+            digest: "d".into(),
+            signature: crate::manifest::Signature::Valid("op".into()),
+        }));
+        let shared = Shared::new(Limits::default(), Arc::new(scope));
+        shared.state().tabs.push(Tab {
+            num: 1,
+            target_id: "T".into(),
+            session_id: Some("S".into()),
+            main_frame: Some("F".into()),
+            ..Tab::default()
+        });
+        let paused = |method: &str, url: &str| {
+            shared
+                .on_paused(&event(
+                    "Fetch.requestPaused",
+                    Some("S"),
+                    json!({"requestId": "r", "resourceType": "Document", "frameId": "F",
+                           "request": {"url": url, "method": method}}),
+                ))
+                .unwrap()
+        };
+        // A script-submitted form: the document request is a POST.
+        let post = paused("POST", "http://site.test/delete");
+        assert!(!post.allow, "the POST is protected");
+        assert_eq!(post.command().0, "Fetch.failRequest");
+        assert_eq!(
+            shared.state().tab(1).unwrap().blocked.as_ref().map(|b| b.1),
+            Some("blocked_protected")
+        );
+        assert!(!paused("POST", "http://site.test/Delete/?x=1").allow);
+        // The same URL fetched with GET, and another POST, are not covered by the pattern.
+        assert!(paused("GET", "http://site.test/delete").allow);
+        assert!(paused("POST", "http://site.test/save").allow);
+    }
+
+    #[test]
     fn only_in_scope_top_level_documents_are_released() {
         let shared = shared();
         shared.state().tab_mut(1).unwrap().main_frame = Some("F".into());
@@ -1082,7 +1166,13 @@ mod tests {
         assert!(!blocked.allow);
         assert_eq!(blocked.command().0, "Fetch.failRequest");
         assert_eq!(
-            shared.state().tab(1).unwrap().blocked.as_deref(),
+            shared
+                .state()
+                .tab(1)
+                .unwrap()
+                .blocked
+                .as_ref()
+                .map(|(origin, _)| origin.as_str()),
             Some("http://evil.test")
         );
         // Frames of other origins and subresources are page content.
@@ -1098,7 +1188,7 @@ mod tests {
         );
         assert!(paused("http://site.test/a", "Document", "F", "UNKNOWN").is_none());
         assert_eq!(
-            blocked_error("http://evil.test").kind,
+            blocked_error("http://evil.test", "out_of_scope").kind,
             crate::error::FailKind::Refused
         );
     }

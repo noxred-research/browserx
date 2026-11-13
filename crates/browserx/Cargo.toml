@@ -28,9 +28,13 @@ serde_json.workspace = true
 reqwest.workspace = true
 rand.workspace = true
 hex.workspace = true
-
-[dev-dependencies]
+serde.workspace = true
 tempfile.workspace = true
+
+[features]
+# Test-only: `browserx agent eval --mutate <layer>` switches one enforcement layer off so the
+# evaluation can prove it notices. Never enabled in releases.
+fault-injection = ["browserx-mcp/fault-injection"]
 
 [lints]
 workspace = true

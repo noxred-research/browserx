@@ -1,23 +1,30 @@
 //! The shared state of a running server.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use browserx_core::ProxyRoute;
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 
+use crate::approvals::Approvals;
 use crate::audit::{Audit, Context as AuditContext};
 use crate::backend::Backend;
 use crate::browse::{Hub, Limits};
 use crate::config::{Capability, Config, read_secret};
+use crate::crypto::OperatorKeys;
 use crate::error::McpError;
+use crate::grants;
+use crate::ledger::Ledger;
 use crate::llm::Llm;
+use crate::manifest;
 use crate::metrics::Sampler;
 use crate::redact::Redactor;
 use crate::safety::{RateLimiter, Scope};
 use crate::sessions::{Managed, Registry};
+use crate::shots::Shots;
 use crate::tools::catalog::{self, ToolDef};
 
 /// Everything the tools need. Built once from the configuration.
@@ -46,8 +53,64 @@ pub struct Ctx {
     pub routes: BTreeMap<String, ProxyRoute>,
     /// The enabled tools.
     pub tools: Vec<ToolDef>,
+    /// The operator keys that verify manifests, grants and approvals.
+    pub keys: Option<OperatorKeys>,
+    /// The session capability ledger (Rule of Two).
+    pub ledger: Ledger,
+    /// Approvals: multi round-trip state and out-of-band records.
+    pub approvals: Approvals,
+    /// Recent screenshots served as resources.
+    pub shots: Shots,
+    /// Calls of the engagement that touched pages, against `limits.max_calls`.
+    pub engagement_calls: AtomicU64,
+    /// Start times of recent calls, for `limits.rps`.
+    pub engagement_recent: Mutex<VecDeque<Instant>>,
     /// Fires on shutdown; stops background tasks.
     pub cancel: CancellationToken,
+}
+
+/// Loads the scope grant and checks it: signed, in force for this engagement and not wider than
+/// the manifest and the configured origins. A grant that fails any check stops the server,
+/// because running without the restriction an operator asked for would widen access silently.
+fn load_grant(
+    cfg: &Config,
+    section: &crate::config::GrantSection,
+    keys: &OperatorKeys,
+    trusted_manifest: Option<&Arc<manifest::Loaded>>,
+) -> Result<grants::Active, McpError> {
+    let signature = section.signature_file.clone().unwrap_or_else(|| {
+        let mut name = section.path.as_os_str().to_owned();
+        name.push(".sig");
+        name.into()
+    });
+    let loaded = grants::Loaded::load(&section.path, &signature, keys)
+        .map_err(|e| McpError::Config(e.to_string()))?;
+    if !loaded.trusted() {
+        return Err(McpError::Config(format!(
+            "the scope grant {} is not signed by an operator key ({:?}): refusing to start",
+            section.path.display(),
+            loaded.signature
+        )));
+    }
+    let origins = cfg.origins()?;
+    let ceiling = grants::Ceiling {
+        engagement: trusted_manifest
+            .map(|m| m.manifest.id.as_str())
+            .or(cfg.engagement.id.as_deref()),
+        manifest: trusted_manifest.map(|m| &m.manifest),
+        origins: &origins,
+        grant: None,
+        max_calls: trusted_manifest.and_then(|m| m.manifest.limits.max_calls),
+        not_after: trusted_manifest.and_then(|m| m.manifest.not_after),
+    };
+    let violations = loaded.grant.violations_against(&ceiling);
+    if !violations.is_empty() {
+        return Err(McpError::Config(format!(
+            "the scope grant widens its ceiling: {}",
+            violations.join("; ")
+        )));
+    }
+    Ok(grants::Active::new(loaded.grant, loaded.digest))
 }
 
 impl std::fmt::Debug for Ctx {
@@ -116,16 +179,52 @@ impl Ctx {
                 id,
                 token,
                 adopted: true,
+                sensitive: None,
             });
         }
 
         let redactor = Redactor::new(secrets);
+        let keys = cfg
+            .operator
+            .as_ref()
+            .map(|operator| {
+                OperatorKeys::load(&operator.keys_file).map_err(|e| McpError::Config(e.to_string()))
+            })
+            .transpose()?;
+        let loaded_manifest = match (&cfg.manifest, &keys) {
+            (Some(section), Some(keys)) => {
+                let signature = section
+                    .signature_file
+                    .clone()
+                    .unwrap_or_else(|| manifest::default_signature_path(&section.path));
+                Some(Arc::new(
+                    manifest::Loaded::load(&section.path, &signature, keys)
+                        .map_err(|e| McpError::Config(e.to_string()))?,
+                ))
+            }
+            _ => None,
+        };
+        let trusted_manifest = loaded_manifest.as_ref().filter(|m| m.trusted());
+        let active_grant = match (&cfg.grant, &keys) {
+            (Some(section), Some(keys)) => {
+                Some(Arc::new(load_grant(&cfg, section, keys, trusted_manifest)?))
+            }
+            _ => None,
+        };
         let audit = Audit::open(
             &cfg.audit.path,
             AuditContext {
-                engagement: cfg.engagement.id.clone(),
-                operator: cfg.engagement.operator.clone(),
-                authorization_note: cfg.engagement.authorization_note.clone(),
+                engagement: trusted_manifest
+                    .map(|m| m.manifest.id.clone())
+                    .or_else(|| cfg.engagement.id.clone()),
+                operator: trusted_manifest
+                    .map(|m| m.manifest.operator.clone())
+                    .or_else(|| cfg.engagement.operator.clone()),
+                authorization_note: trusted_manifest
+                    .map(|m| m.manifest.authorization_note.clone())
+                    .or_else(|| cfg.engagement.authorization_note.clone()),
+                manifest_digest: loaded_manifest.as_ref().map(|m| m.digest.clone()),
+                grant_digest: active_grant.as_ref().map(|g| g.digest.clone()),
             },
             redactor.clone(),
         )
@@ -136,16 +235,22 @@ impl Ctx {
             )
         })?;
 
-        let scope = Arc::new(Scope::new(
-            cfg.origins()?,
-            cfg.browse.require_scope,
-            cfg.window()?,
-        ));
+        let mut scope = Scope::new(cfg.origins()?, cfg.browse.require_scope, cfg.window()?);
+        if let Some(loaded) = &loaded_manifest {
+            scope = scope.with_manifest(Arc::clone(loaded));
+        }
+        if let Some(active) = &active_grant {
+            scope = scope.with_grant(Arc::clone(active));
+        }
+        let scope = Arc::new(scope);
         let hub = Hub::new(Limits::from_config(&cfg.browse), Arc::clone(&scope));
         let sampler = Arc::new(Sampler::new(backend.clone()));
         let route_names: BTreeMap<String, ()> =
             routes.keys().map(|name| (name.clone(), ())).collect();
         let tools = catalog::enabled(&cfg, llm.is_some(), &route_names);
+        let c_enabled = cfg.has(Capability::Interact) || cfg.has(Capability::Evaluate);
+        let ledger = Ledger::new(cfg.safety.rule_of_two.mode, c_enabled);
+        let approvals = Approvals::new(keys.clone(), cfg.approvals_dir(), cfg.approvals.ttl_secs);
         Ok(Arc::new(Self {
             cfg,
             backend,
@@ -159,6 +264,12 @@ impl Ctx {
             sampler,
             routes,
             tools,
+            keys,
+            ledger,
+            approvals,
+            shots: Shots::default(),
+            engagement_calls: AtomicU64::new(0),
+            engagement_recent: Mutex::new(VecDeque::new()),
             cancel: CancellationToken::new(),
         }))
     }
@@ -171,6 +282,24 @@ impl Ctx {
                 self.cancel.clone(),
             );
         }
+    }
+
+    /// The tools a client may see now: sorted by name, and without the tools that change pages
+    /// while a configured engagement manifest is unsigned, invalid or outside its window.
+    #[must_use]
+    pub fn listed_tools(&self) -> Vec<&ToolDef> {
+        let now = Self::now();
+        let mutation_ok = self.scope.check_mutation(now).is_ok();
+        let mut listed: Vec<&ToolDef> = self
+            .tools
+            .iter()
+            .filter(|t| {
+                mutation_ok
+                    || !matches!(t.class, catalog::Class::Interact | catalog::Class::Evaluate)
+            })
+            .collect();
+        listed.sort_by_key(|t| t.name);
+        listed
     }
 
     /// Whether `capability` is enabled.
@@ -205,6 +334,7 @@ impl Ctx {
                 transport: "shutdown",
                 client_name: None,
                 remote: None,
+                principal: None,
             };
             let _ = self.audit.record(&crate::audit::Entry {
                 phase: crate::audit::Phase::Result,
@@ -214,6 +344,7 @@ impl Ctx {
                 outcome: if outcome.is_ok() { "ok" } else { "error" },
                 detail: outcome.err().map(|e| e.to_string()).as_deref(),
                 duration_ms: None,
+                extra: None,
             });
         }
     }

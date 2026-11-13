@@ -6,7 +6,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 
-use super::ax::{self, Options, RefInfo};
+use super::ax::RefInfo;
 use super::conn::{Conn, ConsoleEntry, NetEntry, TabRef};
 use super::scripts;
 use crate::error::{ToolError, ToolResult};
@@ -25,15 +25,6 @@ pub struct NavOutcome {
     pub title: String,
     /// The page finished loading before the timeout.
     pub settled: bool,
-}
-
-/// An accessibility snapshot.
-#[derive(Debug, Clone)]
-pub struct Snapshot {
-    /// Rendered text.
-    pub rendered: ax::Rendered,
-    /// URL of the page.
-    pub url: String,
 }
 
 /// Readable page content.
@@ -106,8 +97,8 @@ impl Conn {
             .call(tab, "Page.navigate", json!({ "url": target.as_str() }))
             .await?;
         if let Some(error) = reply["errorText"].as_str() {
-            if let Some(origin) = self.take_blocked(tab) {
-                return Err(super::conn::blocked_error(&origin));
+            if let Some((origin, code)) = self.take_blocked(tab) {
+                return Err(super::conn::blocked_error(&origin, code));
             }
             return Err(ToolError::browser(format!(
                 "navigation failed: {error}. If the destination is internal, the egress policy may have refused it; call assess."
@@ -156,38 +147,6 @@ impl Conn {
             title: self.title(tab).await,
             settled,
         })
-    }
-
-    /// Takes an accessibility snapshot with element references.
-    pub async fn snapshot(
-        &self,
-        tab: &TabRef,
-        max_chars: usize,
-        interactive_only: bool,
-    ) -> ToolResult<Snapshot> {
-        let tree = self
-            .call(tab, "Accessibility.getFullAXTree", json!({}))
-            .await?;
-        let nodes = tree["nodes"].as_array().cloned().unwrap_or_default();
-        let rendered = {
-            let mut state = self.shared.state();
-            let tab_state = state
-                .tab_mut(tab.num)
-                .ok_or_else(|| ToolError::browser("the tab went away"))?;
-            ax::render(
-                &nodes,
-                &mut tab_state.refs,
-                Options {
-                    max_chars,
-                    interactive_only,
-                },
-            )
-        };
-        let url = self.current_url(tab).await?;
-        self.scope
-            .check_final(&url)
-            .map_err(|r| ToolError::refused(r.0))?;
-        Ok(Snapshot { rendered, url })
     }
 
     /// Extracts the readable main content as Markdown.

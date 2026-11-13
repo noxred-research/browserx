@@ -59,7 +59,7 @@ A client that sees anything other than `resumed_same_process` knows to re-establ
 | **Egress** | A loopback forwarder per dedicated session in front of the browser: direct dialing with a private-range block, or an upstream `http://`, `https://`, `socks5://` or `socks5h://` proxy with credentials kept out of browser flags and logs, and `{session}` / `{generation}` username templates for sticky exits. See [egress](docs/design/egress.md) |
 | **Launch profiles** | Named launch configurations: your own Chromium executable, extra flags, headless or headed. See [launch profiles](docs/guides/launch-profiles.md) |
 | **HTTP API and CLI** | JSON API with typed errors, and `browserx session create\|list\|get\|attach\|renew\|handoff\|snapshot\|release` |
-| **MCP server** | `browserx mcp` serves the Model Context Protocol over stdio or loopback HTTP: capability-gated tools, a scope-checked browsing loop, a hash-chained audit log. See [AI/LLM-native](#aillm-native) |
+| **MCP server** | `browserx mcp` serves the Model Context Protocol (revisions `2026-07-28`, `2025-06-18` and `2025-03-26`) over stdio or loopback HTTP: capability-gated tools, a scope-checked browsing loop, an action gate with human approvals, signed engagement manifests and scope grants, a hash-chained audit log. See [AI/LLM-native](#aillm-native) |
 | **Operations** | Separate ops listener with `/healthz`, `/readyz` and Prometheus `/metrics`; graceful drain on SIGINT/SIGTERM with final snapshots and confirmed browser shutdown. See [operations](docs/guides/operations.md) |
 
 ## AI/LLM-native
@@ -76,10 +76,11 @@ BrowserX is built so that AI agents can **watch, drive and explain** a browser p
 | --- | --- | --- |
 | Monitoring | always on | `capabilities`, `health`, `pool_status`, `assess`, `list_sessions`, `get_session`, `explain_session`, `explain_error`, `list_launch_profiles`, `list_snapshots` |
 | Sessions | `sessions`; `handoff` for `handoff_session` | `create_session`, `renew_session`, `snapshot_session`, `release_session` (needs `confirm: true`), `handoff_session` |
-| Browsing | `browse` | `open_page`, `page_snapshot`, `page_text`, `screenshot`, `list_tabs`, `switch_tab`, `close_tab`, `go_back`, `go_forward`, `wait_for`, `network_log`, `console_log` |
+| Browsing | `browse` | `open_page`, `page_snapshot`, `find_in_snapshot`, `page_text`, `screenshot`, `list_tabs`, `switch_tab`, `close_tab`, `go_back`, `go_forward`, `wait_for`, `network_log`, `console_log` |
 | Interaction | `interact` | `click`, `type_text`, `press_key`, `select_option`, `scroll`, `hover` |
 | Script | `evaluate` (off by default) | `evaluate_js` |
 | LLM-assisted | `[ai]` configured; advisory | `summarize_page`, `extract_data`, `diagnose` |
+| Engagement | always on; `propose_scope_grant` with `browse` and `[operator]` | `engagement_status`, `reset_context`, `propose_scope_grant` |
 
 The server also offers bundled documentation as resources (`browserx://docs/...`, `browserx://sessions/{id}`) and three prompts: `triage_session`, `capacity_review` and `explore_authorized_site`.
 
@@ -95,9 +96,11 @@ For a client that connects over HTTP, add `--http 127.0.0.1:7692`. The listener 
 ### Safety model
 
 - **Scope is enforced in code.** Navigation must match `browse.allowed_origins` (exact origins) and an optional engagement window, and is re-checked after redirects; a page that ends outside scope is replaced by `about:blank` and the call fails. The operator and an authorization note are recorded in every audit entry.
-- **Page content is untrusted.** Every tool that returns page-derived text wraps it in `<untrusted_page_content origin="...">`, and the server instructions tell the model to treat it as data, never as instructions.
+- **Page content is untrusted.** Every tool that returns page-derived text wraps it in `<untrusted_page_content origin="..." nonce="...">` (a fresh nonce per call closes the block and prefixes every line), and the server instructions tell the model to treat it as data, never as instructions.
 - **Secrets never reach the model.** Lease tokens, `cdp_url`, API keys and proxy credentials stay in the MCP server; proxies are chosen by name from configuration.
 - **Everything is audited.** Each tool call is appended to a hash-chained JSONL audit log; `browserx mcp audit verify <path>` checks the chain.
+- **Consequential actions need a human.** Fixed code classifies each action on an element (`destructive`, `credential_entry`, `payment`, ...) and a profile decides allow, approval or deny; an approval is bound to the exact action and works once. `confirm: true` is never an approval.
+- **Rules of engagement are signed.** An operator-signed engagement manifest (hosts as `attack`, `visit` or `blocked`, protected requests, impact ceiling, limits, windows) and an optional signed scope grant narrow what an agent may do; unsigned or altered documents widen nothing. A session ledger (the Rule of Two: untrusted input, sensitive context, a tool that changes pages) can require an approval or refuse when all three meet.
 - **Bounded.** Per-tool rate limits and output budgets, a 4 MiB message limit, and `confirm: true` for destructive tools. Browsing tools only operate on sessions the MCP server created or was told to adopt.
 
 An agent that can click and type can still be misled by hostile page content. Enable `interact` and `evaluate` only for scopes you would let a junior colleague operate, and read [the MCP guide](docs/guides/mcp.md) and [the AI/LLM-native design](docs/design/ai-llm-native.md) before you do.

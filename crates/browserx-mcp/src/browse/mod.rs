@@ -4,8 +4,10 @@
 mod act;
 mod ax;
 mod conn;
+mod features;
 mod page;
 mod scripts;
+mod snapshot;
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -19,6 +21,7 @@ pub use act::{ActionOutcome, Direction, ScrollRequest, SelectBy};
 pub use ax::parse_ref;
 pub use conn::{Conn, TabRef};
 pub use page::{NetFilter, WaitFor};
+pub use snapshot::{FindQuery, MAX_FIND_LIMIT, SnapshotRequest};
 
 use crate::backend::Backend;
 use crate::config::BrowseSection;
@@ -183,6 +186,23 @@ impl Hub {
             let conn = slot.lock().await.take();
             if let Some(conn) = conn {
                 conn.close().await;
+            }
+        }
+    }
+
+    /// Forgets every element reference and stored snapshot of every open page, so a retired
+    /// context cannot act on what it saw: its refs stop resolving until a new snapshot.
+    pub async fn forget_refs(&self) {
+        let slots: Vec<Slot> = self
+            .slots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        for slot in slots {
+            if let Some(conn) = slot.lock().await.as_ref() {
+                conn.forget_refs();
             }
         }
     }

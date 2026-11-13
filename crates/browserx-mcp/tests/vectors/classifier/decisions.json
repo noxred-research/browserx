@@ -1,0 +1,41 @@
+{
+  "read_only": {
+    "read": "allow",
+    "navigate_in_scope": "allow",
+    "navigate_out_of_scope": "deny",
+    "form_edit": "deny",
+    "submit_state_change": "deny",
+    "credential_entry": "deny",
+    "external_communication": "deny",
+    "destructive": "deny",
+    "payment": "deny",
+    "file_transfer": "deny",
+    "unknown": "deny"
+  },
+  "test_environment": {
+    "read": "allow",
+    "navigate_in_scope": "allow",
+    "navigate_out_of_scope": "deny",
+    "form_edit": "allow",
+    "submit_state_change": "allow",
+    "credential_entry": "approval",
+    "external_communication": "approval",
+    "destructive": "approval",
+    "payment": "deny",
+    "file_transfer": "approval",
+    "unknown": "approval"
+  },
+  "authorized_security_test": {
+    "read": "allow",
+    "navigate_in_scope": "allow",
+    "navigate_out_of_scope": "deny",
+    "form_edit": "allow",
+    "submit_state_change": "allow",
+    "credential_entry": "approval",
+    "external_communication": "approval",
+    "destructive": "approval",
+    "payment": "deny",
+    "file_transfer": "approval",
+    "unknown": "allow"
+  }
+}

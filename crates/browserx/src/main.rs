@@ -1,5 +1,6 @@
 //! The `browserx` command-line program.
 
+mod agent_eval;
 mod cli;
 mod client;
 mod doctor;
@@ -12,7 +13,9 @@ use browserx_server::Config;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command, ConfigCommand, KeysCommand, LogFormat, SnapshotKeyCommand};
+use crate::cli::{
+    AgentCommand, Cli, Command, ConfigCommand, KeysCommand, LogFormat, SnapshotKeyCommand,
+};
 
 fn init_logging(format: LogFormat) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -124,6 +127,12 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+        Command::Agent {
+            command: AgentCommand::Eval(args),
+        } => {
+            let status = agent_eval::run(args).await?;
+            std::process::exit(status);
         }
         Command::Session { remote, command } => client::run(&remote, command).await,
     }
