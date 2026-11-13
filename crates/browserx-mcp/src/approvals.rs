@@ -41,6 +41,9 @@ pub const APPROVAL_DOMAIN: &[u8] = b"browserx/approval/v1\0";
 const MAX_CONSUMED: usize = 8192;
 /// Most pending out-of-band approvals.
 const MAX_PENDING: usize = 256;
+/// Most pending out-of-band approvals of one principal, so one caller cannot use up the room
+/// of every other.
+const MAX_PENDING_PER_PRINCIPAL: usize = 16;
 
 /// Why an approval could not be recorded or granted.
 #[derive(Debug, thiserror::Error)]
@@ -150,14 +153,63 @@ pub fn request_digest(tool: &str, arguments: &Value) -> String {
     hex::encode(Sha256::digest(canonical.as_bytes()))
 }
 
-/// Replaces control characters and bounds length, for page-derived text shown to a human.
+/// Whether `c` is invisible or reorders what is shown around it: the Unicode format
+/// characters (category Cf: bidirectional controls and isolates, zero-width characters, the
+/// byte order mark, tags, soft hyphen) and the line and paragraph separators.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00ad}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061c}'
+            | '\u{06dd}'
+            | '\u{070f}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08e2}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
+}
+
+/// Whether `c` is a quotation mark that could close the quote around page text early.
+fn is_quote_char(c: char) -> bool {
+    matches!(
+        c,
+        '"' | '\u{201c}'
+            ..='\u{201f}' | '\u{2033}' | '\u{2036}' | '\u{ff02}' | '\u{00ab}' | '\u{00bb}'
+    )
+}
+
+/// Quotes page-derived text for a human: control and format characters are dropped (a name
+/// cannot reorder the prompt around it), quotation marks and backslashes are escaped (a name
+/// cannot end the quote early and pose as the rest of the prompt), and the length is bounded.
 #[must_use]
 pub fn quote_for_human(text: &str, max: usize) -> String {
-    let cleaned: String = text
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .take(max)
-        .collect();
+    let mut cleaned = String::new();
+    for c in text.chars().take(max) {
+        if c.is_control() {
+            cleaned.push(' ');
+        } else if is_format_char(c) {
+            continue;
+        } else if is_quote_char(c) || c == '\\' {
+            cleaned.push('\\');
+            cleaned.push(c);
+        } else {
+            cleaned.push(c);
+        }
+    }
     format!("\u{201c}{}\u{201d}", cleaned.trim())
 }
 
@@ -339,26 +391,45 @@ impl Approvals {
     ) -> Result<String, ApprovalError> {
         self.ensure_dir()?;
         let mut live = 0;
+        let mut mine = 0;
+        let mut same = None;
         for entry in std::fs::read_dir(&self.dir)? {
             let path = entry?.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !name.ends_with(".pending.json") {
+            let Some(id) = name
+                .strip_suffix(".pending.json")
+                .or_else(|| name.strip_suffix(".used.json"))
+            else {
                 continue;
-            }
-            let expires = std::fs::read(&path)
+            };
+            let used = name.ends_with(".used.json");
+            let record = std::fs::read(&path)
                 .ok()
-                .and_then(|b| serde_json::from_slice::<Pending>(&b).ok())
-                .map_or(0, |p| p.expires);
+                .and_then(|b| serde_json::from_slice::<Pending>(&b).ok());
+            let expires = record.as_ref().map_or(0, |p| p.expires);
             if expires.saturating_add(3600) < now {
                 let _ = std::fs::remove_file(&path);
-                let _ = std::fs::remove_file(
-                    path.with_file_name(name.replace(".pending.json", ".approved")),
-                );
-            } else if expires > now {
+                let _ = std::fs::remove_file(self.approved_path(id));
+                let _ = std::fs::remove_file(self.dir.join(format!("{id}.used")));
+            } else if expires > now
+                && !used
+                && let Some(record) = record
+            {
                 live += 1;
+                if record.principal == principal {
+                    mine += 1;
+                    if record.request == request && record.action == need.action_digest {
+                        same = Some(record.id);
+                    }
+                }
             }
         }
-        if live >= MAX_PENDING {
+        // The same caller asking again for the same action gets the same approval id: the
+        // operator has one thing to approve, and a loop cannot fill the table.
+        if let Some(id) = same {
+            return Ok(id);
+        }
+        if live >= MAX_PENDING || mine >= MAX_PENDING_PER_PRINCIPAL {
             return Err(ApprovalError::TooManyPending);
         }
         let mut id_bytes = [0_u8; 12];
@@ -430,11 +501,17 @@ impl Approvals {
         {
             return Resume::Refused("the approval signature does not verify".into());
         }
-        // Single use across processes: whoever renames the file owns the approval.
+        // Single use across processes: whoever renames the file owns the approval. The pending
+        // record is retired with it, so the id is no longer listed, cannot be approved again and
+        // does not run the action a second time.
         let used = self.dir.join(format!("{id}.used"));
         if std::fs::rename(self.approved_path(id), used).is_err() {
             return Resume::Fresh;
         }
+        let _ = std::fs::rename(
+            self.pending_path(id),
+            self.dir.join(format!("{id}.used.json")),
+        );
         Resume::Approved(Approved {
             action_digest: pending.action,
         })
@@ -491,6 +568,9 @@ pub fn list_pending(dir: &Path, now: i64) -> Result<Vec<PendingView>, ApprovalEr
         if record.expires <= now {
             continue;
         }
+        if dir.join(format!("{}.used", record.id)).exists() {
+            continue;
+        }
         let approved = dir.join(format!("{}.approved", record.id)).exists();
         out.push(PendingView {
             id: record.id,
@@ -522,6 +602,12 @@ pub fn approve(
         return Err(ApprovalError::Record(
             id.into(),
             "not a valid approval id".into(),
+        ));
+    }
+    if dir.join(format!("{id}.used")).exists() {
+        return Err(ApprovalError::Record(
+            id.into(),
+            "already approved and used".into(),
         ));
     }
     let path = dir.join(format!("{id}.pending.json"));
@@ -723,8 +809,21 @@ mod tests {
         );
         assert_eq!(
             engine.oob_resume("stdio", "click", &request, &id, 1004),
-            Resume::Pending(id.clone()),
-            "the used approval is gone: back to pending, never approved again"
+            Resume::Fresh,
+            "the used approval is gone with its pending record: never approved again"
+        );
+        assert!(
+            list_pending(dir.path(), 1004).unwrap().is_empty(),
+            "a used approval is not listed as pending"
+        );
+        assert!(
+            approve(dir.path(), &id, &keys, "op", 1004).is_err(),
+            "a used approval id cannot be approved again"
+        );
+        assert_eq!(
+            engine.oob_resume("stdio", "click", &request, &id, 1005),
+            Resume::Fresh,
+            "approving a used id again does not run the action again"
         );
         assert!(matches!(
             engine.oob_resume("stdio", "click", &request, "apr_nothex", 1004),
@@ -751,15 +850,68 @@ mod tests {
     fn pending_requests_are_bounded_and_expire() {
         let dir = tempfile::tempdir().unwrap();
         let engine = engine(dir.path());
-        for _ in 0..MAX_PENDING {
-            engine.oob_request("p", "r", &need(), 1000).unwrap();
+        for n in 0..MAX_PENDING {
+            let principal = format!("p{}", n / MAX_PENDING_PER_PRINCIPAL);
+            engine
+                .oob_request(&principal, &format!("r{n}"), &need(), 1000)
+                .unwrap();
         }
         assert!(matches!(
-            engine.oob_request("p", "r", &need(), 1000),
+            engine.oob_request("last", "r-last", &need(), 1000),
             Err(ApprovalError::TooManyPending)
         ));
         // Much later the old ones are gone and new requests work again.
-        engine.oob_request("p", "r", &need(), 10_000).unwrap();
+        engine.oob_request("p0", "r", &need(), 10_000).unwrap();
+    }
+
+    #[test]
+    fn one_caller_repeating_a_call_neither_multiplies_nor_blocks_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path());
+        // The same principal, request and action always get the same id.
+        let first = engine.oob_request("loop", "r", &need(), 1000).unwrap();
+        for _ in 0..(MAX_PENDING * 2) {
+            assert_eq!(
+                engine.oob_request("loop", "r", &need(), 1001).unwrap(),
+                first
+            );
+        }
+        assert_eq!(list_pending(dir.path(), 1001).unwrap().len(), 1);
+        // Another principal asking for the same thing has its own record.
+        let other = engine.oob_request("calm", "r", &need(), 1001).unwrap();
+        assert_ne!(other, first);
+        // Distinct requests of one principal stop at the per-principal cap, others go on.
+        for n in 0..MAX_PENDING_PER_PRINCIPAL {
+            let _ = engine.oob_request("loop", &format!("distinct{n}"), &need(), 1002);
+        }
+        assert!(matches!(
+            engine.oob_request("loop", "one-more", &need(), 1003),
+            Err(ApprovalError::TooManyPending)
+        ));
+        assert!(engine.oob_request("calm", "another", &need(), 1003).is_ok());
+    }
+
+    #[test]
+    fn human_text_cannot_spoof_the_prompt_with_format_characters_or_quotes() {
+        // Bidirectional and zero-width characters are dropped.
+        let quoted = quote_for_human("Ca\u{202e}ncel\u{200b}\u{2066}\u{feff}!", 80);
+        assert_eq!(quoted, "\u{201c}Cancel!\u{201d}");
+        // A closing quote in the name cannot end the quote early.
+        let quoted = quote_for_human("Delete\u{201d} (safe) \u{201c}\"x\"", 80);
+        assert_eq!(
+            quoted,
+            "\u{201c}Delete\\\u{201d} (safe) \\\u{201c}\\\"x\\\"\u{201d}"
+        );
+        let unescaped = quoted
+            .trim_start_matches('\u{201c}')
+            .trim_end_matches('\u{201d}');
+        let mut previous_backslash = false;
+        for c in unescaped.chars() {
+            if is_quote_char(c) {
+                assert!(previous_backslash, "an unescaped quote in {quoted}");
+            }
+            previous_backslash = c == '\\' && !previous_backslash;
+        }
     }
 
     #[test]

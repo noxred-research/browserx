@@ -138,6 +138,30 @@
           }
         ]
       }
+    },
+    "grant_ro": {
+      "capabilities": [
+        "sessions",
+        "browse",
+        "interact",
+        "evaluate"
+      ],
+      "profile": "authorized_security_test",
+      "rule_of_two": "off",
+      "scope": [
+        "app",
+        "docs",
+        "frame"
+      ],
+      "grant": {
+        "ro": [
+          "docs"
+        ],
+        "rw": [
+          "app"
+        ],
+        "plan": []
+      }
     }
   },
   "cases": [
@@ -846,6 +870,275 @@
           "layer": "grant",
           "expect": {
             "refused": "proposal_widens_ceiling"
+          }
+        }
+      ]
+    },
+    {
+      "id": "ledger-reset-needs-approval",
+      "layer": "ledger",
+      "config": "ledger",
+      "description": "a model that holds untrusted input and sensitive context cannot clear them with reset_context: the reset needs a human, and the flags stay set",
+      "steps": [
+        {
+          "tool": "open_page",
+          "args": {
+            "session_id": "$session",
+            "url": "@@app@@/"
+          },
+          "expect": {
+            "ok": true
+          }
+        },
+        {
+          "tool": "page_snapshot",
+          "args": {
+            "session_id": "$session"
+          },
+          "expect": {
+            "ok": true
+          }
+        },
+        {
+          "tool": "create_session",
+          "args": {
+            "launch_profile": "default",
+            "persistence": "snapshot"
+          },
+          "expect": {
+            "ok": true
+          }
+        },
+        {
+          "tool": "page_snapshot",
+          "args": {
+            "session_id": "$session"
+          },
+          "expect": {
+            "ok": true
+          }
+        },
+        {
+          "tool": "click",
+          "args": {
+            "session_id": "$session",
+            "ref": {
+              "$ref": "button \"Run report\""
+            }
+          },
+          "layer": "ledger",
+          "expect": {
+            "approval_required": true
+          }
+        },
+        {
+          "tool": "reset_context",
+          "args": {},
+          "layer": "ledger",
+          "expect": {
+            "approval_required": true
+          }
+        },
+        {
+          "tool": "click",
+          "args": {
+            "session_id": "$session",
+            "ref": {
+              "$ref": "button \"Run report\""
+            }
+          },
+          "layer": "ledger",
+          "expect": {
+            "approval_required": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "ledger-reset-refused-in-strict",
+      "layer": "ledger",
+      "config": "ledger_strict",
+      "description": "in strict mode reset_context is refused while the session holds untrusted input or sensitive context",
+      "steps": [
+        {
+          "tool": "open_page",
+          "args": {
+            "session_id": "$session",
+            "url": "@@app@@/"
+          },
+          "expect": {
+            "ok": true
+          }
+        },
+        {
+          "tool": "page_snapshot",
+          "args": {
+            "session_id": "$session"
+          },
+          "expect": {
+            "ok": true
+          }
+        },
+        {
+          "tool": "create_session",
+          "args": {
+            "launch_profile": "default",
+            "persistence": "snapshot"
+          },
+          "expect": {
+            "ok": true
+          }
+        },
+        {
+          "tool": "page_snapshot",
+          "args": {
+            "session_id": "$session"
+          },
+          "expect": {
+            "ok": true
+          }
+        },
+        {
+          "tool": "click",
+          "args": {
+            "session_id": "$session",
+            "ref": {
+              "$ref": "button \"Run report\""
+            }
+          },
+          "layer": "ledger",
+          "expect": {
+            "refused": "rule_of_two"
+          }
+        },
+        {
+          "tool": "reset_context",
+          "args": {},
+          "layer": "ledger",
+          "expect": {
+            "refused": "reset_refused"
+          }
+        },
+        {
+          "tool": "click",
+          "args": {
+            "session_id": "$session",
+            "ref": {
+              "$ref": "button \"Run report\""
+            }
+          },
+          "layer": "ledger",
+          "expect": {
+            "refused": "rule_of_two"
+          }
+        }
+      ]
+    },
+    {
+      "id": "grant-read-only-origin-is-not-actionable",
+      "layer": "grant",
+      "config": "grant_ro",
+      "description": "a page of a read-only origin of the grant can be read but not typed into, selected from, keyed, clicked or scripted",
+      "steps": [
+        {
+          "tool": "open_page",
+          "args": {
+            "session_id": "$session",
+            "url": "@@app@@/"
+          },
+          "expect": {
+            "ok": true
+          }
+        },
+        {
+          "tool": "page_snapshot",
+          "args": {
+            "session_id": "$session"
+          },
+          "expect": {
+            "ok": true
+          }
+        },
+        {
+          "tool": "open_page",
+          "args": {
+            "session_id": "$session",
+            "url": "@@docs@@/"
+          },
+          "expect": {
+            "ok": true
+          }
+        },
+        {
+          "tool": "page_snapshot",
+          "args": {
+            "session_id": "$session"
+          },
+          "expect": {
+            "ok": true
+          }
+        },
+        {
+          "tool": "type_text",
+          "args": {
+            "session_id": "$session",
+            "ref": {
+              "$ref": "textbox \"Note\""
+            },
+            "text": "injected"
+          },
+          "layer": "grant",
+          "expect": {
+            "refused": "origin_not_in_rw"
+          }
+        },
+        {
+          "tool": "select_option",
+          "args": {
+            "session_id": "$session",
+            "ref": {
+              "$ref": "combobox \"Pick\""
+            },
+            "label": "two"
+          },
+          "layer": "grant",
+          "expect": {
+            "refused": "origin_not_in_rw"
+          }
+        },
+        {
+          "tool": "press_key",
+          "args": {
+            "session_id": "$session",
+            "key": "a"
+          },
+          "layer": "grant",
+          "expect": {
+            "refused": "origin_not_in_rw"
+          }
+        },
+        {
+          "tool": "click",
+          "args": {
+            "session_id": "$session",
+            "ref": {
+              "$ref": "button \"Run\""
+            }
+          },
+          "layer": "grant",
+          "expect": {
+            "refused": "origin_not_in_rw"
+          }
+        },
+        {
+          "tool": "evaluate_js",
+          "args": {
+            "session_id": "$session",
+            "expression": "document.title"
+          },
+          "layer": "grant",
+          "expect": {
+            "refused": "origin_not_in_rw"
           }
         }
       ]

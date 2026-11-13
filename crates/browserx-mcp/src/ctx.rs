@@ -179,6 +179,7 @@ impl Ctx {
                 id,
                 token,
                 adopted: true,
+                sensitive: None,
             });
         }
 

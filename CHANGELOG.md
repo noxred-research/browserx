@@ -46,6 +46,20 @@ Initial development toward 0.1.0. Source-only: no binaries or images are publish
 - **Session ledger (Rule of Two).** Per session handle, three flags that only turn on (untrusted input read, sensitive context, a page-changing tool enabled); with all three set a consequential call is allowed with a warning, needs an approval or is refused, per `[safety.rule_of_two] mode` (`off`, `warn`, `enforce`, `strict`). `engagement_status` shows the flags and `reset_context` starts a fresh handle. Audit entries carry the handle, the flags, the action class, the refusal reason and the manifest state.
 - **Adversarial evaluation.** `browserx agent eval --suite <path> --report <path> --seed <n>` runs a versioned suite against the enforcement layers on a loopback fixture server with a real Chromium (exit status `2` when Chromium is missing) and writes a JSON report with an attempted, blocked and escaped matrix per layer; it exits `0` only with no deterministic escape and every case passing. A `fault-injection` build adds `--mutate <layer>` for harness self-tests.
 
+### Fixed
+
+Review findings on the trust foundation (before its first release):
+
+- **`reset_context` cannot be used to step out of the Rule of Two.** Once a handle holds untrusted input or sensitive context the reset needs a human approval under `enforce` and is refused (`reset_refused`) under `strict`; it invalidates every element ref; and the call count, time budget and plan progress of a scope grant now belong to the principal, so a reset no longer refills a budget or rewinds a plan.
+- **Persistent, `profile_id` and proxy-route sessions keep flag B** on every use, after a reset and for every principal, as adopted sessions do.
+- **Read-only origins are not places to act.** With a scope grant, `type_text`, `select_option`, `press_key`, `click` and `evaluate_js` on a page outside `rw_origins` are refused (`origin_not_in_rw`).
+- **Approvals.** A used out-of-band approval is retired with its pending record (no second run, no second approval); one caller can no longer fill the pending table (deduplicated per caller, at most 16 per caller); names shown to a human lose direction-changing and invisible characters and have their quotes escaped; the elicitation message is redacted and bounded.
+- **Action classification runs out of the page's reach.** Element features are collected in an isolated world, so a page cannot lower a class by patching `getAttribute`, `closest` or `URL`; `<button type="foo">` is a submit button; Enter in a field is classified by the request of the form's default button; frames in other processes are found for the screenshot guard (a frame with an unknown origin refuses the screenshot).
+- **Protected requests.** Patterns match the path as a server routes it (case, percent-encoding, dot segments, slashes, trailing slash, `;parameters`, query kept apart), and the network hold checks them with the request's real method.
+- **Scope grants.** The exfiltration guard sees secrets in query keys and percent-encoded paths and fragments; a proposal can no longer drop the plan, raise budgets or move the window to count as narrowing; plan origins are normalized; screenshots count as untrusted input; links longer than a URL the browser would accept are not kept.
+- **Manifest hosts.** IDN hosts match by punycode and bracketed IPv6 literals are accepted.
+- **HTTP.** A `2026-07-28` header binds the request to that revision (`-32020` for a body that does not declare it).
+
 ### Changed
 
 - **MCP page-changing tools pass the action gate.** `click`, `type_text`, `press_key`, `select_option` and `evaluate_js` are classified and decided by `[safety] profile`, which defaults to `test_environment`: credential entry, external communication, destructive actions, file transfers and unknown effects need an approval and payments are refused. Configurations without a `[safety.rule_of_two]` section keep working because the missing section means `warn` (recorded, never blocking); `examples/mcp.toml` sets `enforce` for new installs. `tools/list` is now sorted by name and each tool lists `title`, `outputSchema` and annotations.

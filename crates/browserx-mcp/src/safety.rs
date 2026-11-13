@@ -12,8 +12,8 @@ use crate::config::Window;
 use crate::grants::{self, Active};
 use crate::manifest::{self, HostMode};
 
-/// Longest URL accepted for navigation.
-const MAX_URL_BYTES: usize = 2048;
+/// Longest URL accepted for navigation, and longest link kept from a page.
+pub const MAX_URL_BYTES: usize = 2048;
 
 /// A deterministic refusal: the reason shown to the model and a stable reason code shared
 /// with the audit log (`out_of_scope`, `window_closed`, `blocked_protected`, `origin_not_in_rw`,
@@ -235,14 +235,15 @@ impl Scope {
         self.origins.iter().any(|allowed| allowed == origin)
     }
 
-    /// The manifest, configured origins and grant, applied to one http(s) URL.
-    fn check_policy(&self, url: &url::Url, origin: &str) -> Result<(), Refusal> {
+    /// The manifest, configured origins and grant, applied to one http(s) URL requested with
+    /// `method`.
+    fn check_policy(&self, method: &str, url: &url::Url, origin: &str) -> Result<(), Refusal> {
         if let Some(loaded) = self.trusted_manifest() {
             let manifest = &loaded.manifest;
-            if manifest.is_protected("GET", url) {
+            if manifest.is_protected(method, url) {
                 return Err(Refusal(
                     format!(
-                        "{origin}{} is a protected URL of the engagement: it is never loaded",
+                        "{method} {origin}{} is a protected request of the engagement: it is never sent",
                         url.path()
                     ),
                     "blocked_protected",
@@ -348,12 +349,21 @@ impl Scope {
         ))
     }
 
-    /// Checks a URL before the browser is sent to it.
+    /// Checks a URL before the browser is sent to it (a `GET`).
     ///
     /// # Errors
     /// A [`Refusal`] for a non-http(s) scheme, credentials in the URL, an over-long URL or an
     /// origin outside the scope.
     pub fn check_url(&self, raw: &str) -> Result<url::Url, Refusal> {
+        self.check_url_as("GET", raw)
+    }
+
+    /// Checks a URL a request with `method` is about to be sent to: [`Scope::check_url`] with
+    /// the protected patterns read for that method.
+    ///
+    /// # Errors
+    /// The same refusals as [`Scope::check_url`].
+    pub fn check_url_as(&self, method: &str, raw: &str) -> Result<url::Url, Refusal> {
         if raw.len() > MAX_URL_BYTES {
             return Err(Refusal(
                 format!("the URL exceeds {MAX_URL_BYTES} bytes"),
@@ -382,7 +392,7 @@ impl Scope {
             ));
         }
         let origin = url.origin().ascii_serialization();
-        self.check_policy(&url, &origin)?;
+        self.check_policy(method, &url, &origin)?;
         Ok(url)
     }
 
@@ -396,8 +406,17 @@ impl Scope {
     /// Why the browser may not fetch `raw` as a top-level document, or `None` when it may.
     #[must_use]
     pub fn navigation_refusal(&self, raw: &str) -> Option<Refusal> {
+        self.navigation_refusal_as("GET", raw)
+    }
+
+    /// [`Scope::navigation_refusal`] for a request with `method`: a protected `POST` pattern
+    /// holds back a document request that submits one, whatever script started it.
+    #[must_use]
+    pub fn navigation_refusal_as(&self, method: &str, raw: &str) -> Option<Refusal> {
         match url::Url::parse(raw) {
-            Ok(url) if matches!(url.scheme(), "http" | "https") => self.check_url(raw).err(),
+            Ok(url) if matches!(url.scheme(), "http" | "https") => {
+                self.check_url_as(method, raw).err()
+            }
             Ok(_) => None,
             Err(_) => Some(Refusal("an unparsable URL".into(), "invalid_url")),
         }

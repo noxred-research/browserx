@@ -69,7 +69,7 @@ fn the_injection_lab_passes_with_no_escape_and_verdicts_do_not_depend_on_the_see
     assert_eq!(code, 0, "{first}");
     assert_eq!(first["summary"]["deterministic_escapes"], 0);
     assert_eq!(first["summary"]["failed"], 0);
-    assert!(first["summary"]["cases"].as_u64().unwrap() >= 18);
+    assert!(first["summary"]["cases"].as_u64().unwrap() >= 21);
     for layer in [
         "scope",
         "grant",

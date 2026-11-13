@@ -12,6 +12,13 @@
 //! 5. the grant's plan (`outside_plan`);
 //! 6. the Rule of Two for consequential calls;
 //! 7. an approval, when one is needed, bound to the exact action by a digest.
+//!
+//! Before all of these, an interaction with a page (`Kind::Element`, `Kind::Evaluate`) must
+//! happen on a read-write origin of the active grant (`origin_not_in_rw`).
+//!
+//! `reset_context` does not pass through the gate above: a model that could clear the ledger
+//! could always step out of the Rule of Two. [`authorize_reset`] asks a human (`enforce`) or
+//! refuses (`strict`) once the handle holds untrusted input or sensitive context.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +29,7 @@ use sha2::{Digest as _, Sha256};
 use crate::approvals::{ApprovalNeed, Approved, quote_for_human};
 use crate::audit::canonical_json;
 use crate::classifier::{ActionClass, Decision, Profile, decide};
+use crate::config::RuleOfTwoMode;
 use crate::ctx::Ctx;
 use crate::error::{ToolError, ToolResult};
 use crate::grants::PlanVerdict;
@@ -271,6 +279,17 @@ pub fn authorize(ctx: &Ctx, call: &Call<'_>, subject: &Subject) -> ToolResult<()
     }
     note_target(ctx, call, &subject.url);
 
+    if matches!(subject.kind, Kind::Element | Kind::Evaluate)
+        && let Some(grant) = ctx.scope.grant()
+        && !grant.grant.can_write(&origin)
+    {
+        return Err(ToolError::refused_with(
+            "origin_not_in_rw",
+            format!(
+                "{origin} is not a read-write origin of the scope grant: pages there can be read, not acted on"
+            ),
+        ));
+    }
     if let Some(grant) = ctx.scope.grant()
         && subject.kind != Kind::Plain
         && !grant.grant.allows_action(subject.class.name())
@@ -366,42 +385,94 @@ pub fn authorize(ctx: &Ctx, call: &Call<'_>, subject: &Subject) -> ToolResult<()
             Verdict::Refuse => {
                 return Err(ToolError::refused_with(
                     "rule_of_two",
-                    "untrusted input, sensitive context and a consequential capability are all present in this session, and the policy is strict: the call is refused. Call reset_context to start a fresh session context.",
+                    "untrusted input, sensitive context and a consequential capability are all present in this session, and the policy is strict: the call is refused. Only the operator can start a fresh session context (restart the server); reset_context is refused too.",
                 ));
             }
         }
     }
     if !reasons.is_empty() {
-        let digest = digest_of(ctx, subject);
-        if !call.take_approval(&digest) {
-            let summary = if subject.target.is_empty() {
-                format!("{} on {}.", subject.tool, subject.url)
-            } else {
-                format!(
-                    "{} on {} at {}.",
-                    subject.tool,
-                    quote_for_human(&subject.target, 80),
-                    subject.url
-                )
-            };
-            return Err(ToolError::approval_required(ApprovalNeed {
-                action_digest: digest,
-                tool: subject.tool.to_owned(),
-                class: subject.class.name().to_owned(),
-                origin,
-                reasons,
-                summary,
-                plan_digest: ctx.scope.grant().and_then(|g| g.grant.plan_digest()),
-                grant_digest: ctx.scope.grant().map(|g| g.digest.clone()),
-            }));
-        }
-        call.note("approved", json!(true));
+        demand_approval(ctx, call, subject, subject.class.name(), origin, reasons)?;
     }
     if let (Some(index), Some(grant)) = (plan_step, ctx.scope.grant()) {
         ctx.ledger
             .plan_consume(&call.handle, grant.grant.plan.len(), index);
     }
     Ok(())
+}
+
+/// Lets the call run when the approval it carries covers exactly this action; otherwise answers
+/// with the approval request a human is asked about.
+fn demand_approval(
+    ctx: &Ctx,
+    call: &Call<'_>,
+    subject: &Subject,
+    class: &str,
+    origin: String,
+    reasons: Vec<String>,
+) -> ToolResult<()> {
+    let digest = digest_of(ctx, subject);
+    if !call.take_approval(&digest) {
+        let summary = if subject.target.is_empty() {
+            format!("{} on {}.", subject.tool, subject.url)
+        } else {
+            format!(
+                "{} on {} at {}.",
+                subject.tool,
+                quote_for_human(&subject.target, 80),
+                subject.url
+            )
+        };
+        return Err(ToolError::approval_required(ApprovalNeed {
+            action_digest: digest,
+            tool: subject.tool.to_owned(),
+            class: class.to_owned(),
+            origin,
+            reasons,
+            summary,
+            plan_digest: ctx.scope.grant().and_then(|g| g.grant.plan_digest()),
+            grant_digest: ctx.scope.grant().map(|g| g.digest.clone()),
+        }));
+    }
+    call.note("approved", json!(true));
+    Ok(())
+}
+
+/// Authorizes `reset_context`. A fresh handle clears the Rule of Two flags, so a model that
+/// could reset on its own could drop the untrusted input or the sensitive context it holds and
+/// then run the consequential call it was refused. While the handle holds either flag, the
+/// reset needs a human approval (`enforce`) and is refused under `strict`; `warn` and `off`
+/// leave it free, as they leave the Rule of Two itself.
+///
+/// # Errors
+/// A refusal under `strict`, or the approval request under `enforce`.
+pub fn authorize_reset(ctx: &Ctx, call: &Call<'_>) -> ToolResult<()> {
+    let flags = ctx.ledger.flags(&call.handle);
+    if !(flags.a || flags.b) {
+        return Ok(());
+    }
+    match ctx.ledger.mode() {
+        RuleOfTwoMode::Off => Ok(()),
+        RuleOfTwoMode::Warn => {
+            call.note("rule_of_two", json!("warn"));
+            Ok(())
+        }
+        RuleOfTwoMode::Strict => Err(ToolError::refused_with(
+            "reset_refused",
+            "this session holds untrusted input or sensitive context and the policy is strict: a model cannot clear it with reset_context. The operator starts a fresh session context by restarting the server.",
+        )),
+        RuleOfTwoMode::Enforce => {
+            let mut subject = Subject::plain("reset_context", ActionClass::Read, "about:blank");
+            subject.target = "the session context".to_owned();
+            demand_approval(
+                ctx,
+                call,
+                &subject,
+                "context_reset",
+                "the session".to_owned(),
+                vec!["reset_context".to_owned()],
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -500,6 +571,45 @@ mod tests {
             authorize(&ctx, &call(&ctx, None), &s).unwrap_err().reason(),
             Some("profile_denied")
         );
+    }
+
+    #[test]
+    fn a_reset_is_free_until_the_handle_holds_untrusted_input_or_sensitive_context() {
+        for mode in ["off", "warn", "enforce", "strict"] {
+            for flag in [Flag::A, Flag::B] {
+                let (ctx, _dir) = ctx_from(&format!(
+                    "{BROWSE}[safety.rule_of_two]\nmode = \"{mode}\"\nprivate_network_is_sensitive = false\n"
+                ));
+                let c = call(&ctx, None);
+                assert!(
+                    authorize_reset(&ctx, &c).is_ok(),
+                    "{mode}: nothing seen yet"
+                );
+                ctx.ledger.mark(&c.handle, flag, "seen");
+                let outcome = authorize_reset(&ctx, &call(&ctx, None));
+                match mode {
+                    "off" | "warn" => assert!(outcome.is_ok(), "{mode}"),
+                    "strict" => assert_eq!(
+                        outcome.unwrap_err().reason(),
+                        Some("reset_refused"),
+                        "{flag:?}"
+                    ),
+                    _ => {
+                        let need = outcome.unwrap_err().approval.unwrap();
+                        assert_eq!(need.reasons, vec!["reset_context".to_owned()]);
+                        let approved = Approved {
+                            action_digest: need.action_digest,
+                        };
+                        assert!(authorize_reset(&ctx, &call(&ctx, Some(&approved))).is_ok());
+                        // An approval of another action does not cover the reset.
+                        let other = Approved {
+                            action_digest: "0".repeat(64),
+                        };
+                        assert!(authorize_reset(&ctx, &call(&ctx, Some(&other))).is_err());
+                    }
+                }
+            }
+        }
     }
 
     #[test]

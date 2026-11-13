@@ -31,8 +31,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::protocol::{
-    HEADER_MISMATCH, INTERNAL_ERROR, INVALID_REQUEST, Incoming, PARSE_ERROR, RpcError, error_frame,
-    parse_incoming, read_meta, result_frame, supported_versions, unsupported_version,
+    HEADER_MISMATCH, INTERNAL_ERROR, INVALID_REQUEST, Incoming, MODERN_VERSIONS, PARSE_ERROR,
+    RpcError, error_frame, parse_incoming, read_meta, result_frame, supported_versions,
+    unsupported_version,
 };
 use crate::server::{Server, Transport};
 
@@ -176,6 +177,16 @@ fn validate_headers(
             && !supported_versions().contains(&version)
         {
             return Err(unsupported_version(version));
+        }
+        // A header that names the modern revision binds the request to it: a body without that
+        // version in `_meta` would be served with legacy semantics while a gateway routes on
+        // `Mcp-Method` and `Mcp-Name` headers nobody compared with the body.
+        if let Some(version) = header_version
+            && MODERN_VERSIONS.contains(&version)
+        {
+            return Err(mismatch(format!(
+                "Header mismatch: the MCP-Protocol-Version header names {version:?} but the request does not declare it in `_meta`"
+            )));
         }
         return Ok(());
     }

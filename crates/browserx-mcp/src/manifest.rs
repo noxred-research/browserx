@@ -180,19 +180,28 @@ pub struct HostPattern {
 
 impl HostPattern {
     fn parse(text: &str) -> Result<Self, ManifestError> {
-        let lowered = text.trim().to_ascii_lowercase();
-        let (name, port) = match lowered.rsplit_once(':') {
-            Some((name, port)) if !name.ends_with(']') || name.starts_with('[') => {
-                let port: u16 = port
-                    .parse()
-                    .map_err(|_| invalid(format!("scope host {text:?}: bad port")))?;
-                (name.to_owned(), Some(port))
+        let bad = |why: &str| invalid(format!("scope host {text:?}: {why}"));
+        let trimmed = text.trim();
+        let port_of = |port: &str| port.parse::<u16>().map_err(|_| bad("bad port"));
+        // A bracketed IPv6 literal keeps its colons; any other colon starts the port.
+        let (name, port) = if let Some(rest) = trimmed.strip_prefix('[') {
+            let (inner, tail) = rest.split_once(']').ok_or_else(|| bad("unclosed `[`"))?;
+            let port = match tail {
+                "" => None,
+                tail => Some(port_of(
+                    tail.strip_prefix(':').ok_or_else(|| bad("bad port"))?,
+                )?),
+            };
+            (format!("[{inner}]"), port)
+        } else {
+            match trimmed.rsplit_once(':') {
+                Some((name, port)) => (name.to_owned(), Some(port_of(port)?)),
+                None => (trimmed.to_owned(), None),
             }
-            _ => (lowered.clone(), None),
         };
         let (wildcard, host) = match name.strip_prefix("*.") {
-            Some(rest) => (true, rest.to_owned()),
-            None => (false, name),
+            Some(rest) => (true, rest),
+            None => (false, name.as_str()),
         };
         if host.is_empty()
             || host.contains("://")
@@ -204,6 +213,14 @@ impl HostPattern {
                 "scope host {text:?} must be a host name, `host:port` or `*.suffix` (no scheme or path)"
             )));
         }
+        // Parsed the way a URL's host is, so the pattern is the form `host_str` reports: IDN
+        // names in punycode, case folded, IPv4 normalized, IPv6 in brackets.
+        let host = match url::Host::parse(host) {
+            Ok(url::Host::Domain(domain)) => domain,
+            Ok(ip) if !wildcard => ip.to_string(),
+            Ok(_) => return Err(bad("a wildcard needs a domain name, not an IP address")),
+            Err(error) => return Err(bad(&format!("not a valid host ({error})"))),
+        };
         Ok(Self {
             host,
             port,
@@ -228,12 +245,74 @@ impl HostPattern {
 }
 
 /// A protected request pattern: `METHOD glob`; `*` in the glob matches any text.
+///
+/// The glob is matched against the request the way a server routes it, not against the bytes
+/// the client wrote: letter case is ignored, percent-escapes are decoded (repeatedly), `.` and
+/// `..` segments, `;parameters`, repeated and backslash slashes and a trailing slash do not
+/// matter, and the query is kept apart from the path (`/account/delete` also protects
+/// `/account/delete?x=1`; a glob that names a query, such as `/search?q=*`, matches it). A glob
+/// starting with `/` is matched against the path, any glob against the full URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtectedRule {
     /// Upper-case method, or `None` for any.
     pub method: Option<String>,
-    /// The glob matched against the full URL and, when it starts with `/`, the path.
+    /// The glob as the operator wrote it.
     pub glob: String,
+    folded: String,
+}
+
+/// Decodes `%XX` escapes; an invalid escape stays as written and bytes that are not UTF-8 become
+/// U+FFFD.
+#[must_use]
+pub(crate) fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let escaped = (bytes[at] == b'%')
+            .then(|| bytes.get(at + 1..at + 3))
+            .flatten()
+            .and_then(|pair| {
+                let high = char::from(pair[0]).to_digit(16)?;
+                let low = char::from(pair[1]).to_digit(16)?;
+                u8::try_from(high * 16 + low).ok()
+            });
+        match escaped {
+            Some(byte) => {
+                out.push(byte);
+                at += 3;
+            }
+            None => {
+                out.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A path the way a server resolves it: decoded until stable, `\` as `/`, no `.`, `..`, empty
+/// or `;parameter` parts, lower case, a leading `/` and no trailing one.
+fn normalized_path(path: &str) -> String {
+    let mut decoded = path.to_owned();
+    for _ in 0..4 {
+        let next = percent_decode(&decoded);
+        if next == decoded {
+            break;
+        }
+        decoded = next;
+    }
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in decoded.split(['/', '\\']) {
+        match segment.split(';').next().unwrap_or("") {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            segment => segments.push(segment),
+        }
+    }
+    format!("/{}", segments.join("/")).to_lowercase()
 }
 
 impl ProtectedRule {
@@ -257,6 +336,7 @@ impl ProtectedRule {
         };
         Ok(Self {
             method,
+            folded: percent_decode(glob).to_lowercase(),
             glob: glob.to_owned(),
         })
     }
@@ -269,14 +349,27 @@ impl ProtectedRule {
         {
             return false;
         }
-        let full = url.as_str();
-        let mut path = url.path().to_owned();
-        if let Some(query) = url.query() {
-            path.push('?');
-            path.push_str(query);
+        let path = normalized_path(url.path());
+        let query = url.query().map(|q| percent_decode(q).to_lowercase());
+        let authority = url[url::Position::BeforeScheme..url::Position::BeforePath].to_lowercase();
+        // The path with and without its trailing slash, so `/admin/` and `/admin` both match.
+        let mut paths = vec![path.clone()];
+        if path != "/" {
+            paths.push(format!("{path}/"));
         }
-        glob_match(&self.glob, full)
-            || (self.glob.starts_with('/') && glob_match(&self.glob, &path))
+        let mut forms: Vec<String> = vec![url.as_str().to_lowercase()];
+        let mut path_forms: Vec<String> = Vec::new();
+        for path in &paths {
+            path_forms.push(path.clone());
+            forms.push(format!("{authority}{path}"));
+            if let Some(query) = &query {
+                path_forms.push(format!("{path}?{query}"));
+                forms.push(format!("{authority}{path}?{query}"));
+            }
+        }
+        forms.iter().any(|form| glob_match(&self.folded, form))
+            || (self.folded.starts_with('/')
+                && path_forms.iter().any(|form| glob_match(&self.folded, form)))
     }
 }
 
@@ -802,6 +895,100 @@ allow = ["Mon-Fri 09:00-17:00 UTC"]
         assert!(!manifest.is_protected("GET", &url("https://app.example.test/logout")));
         assert!(manifest.is_protected("GET", &url("https://app.example.test/account/delete?id=1")));
         assert!(!manifest.is_protected("GET", &url("https://app.example.test/account")));
+    }
+
+    #[test]
+    fn protected_patterns_see_through_case_encoding_slashes_and_queries() {
+        let manifest =
+            Manifest::parse(&SAMPLE.replace("* /account/delete*", "POST /account/delete")).unwrap();
+        for path in [
+            "/account/delete",
+            "/account/delete/",
+            "/Account/Delete",
+            "/ACCOUNT/DELETE/",
+            "//account//delete",
+            "/account/./delete",
+            "/account/x/../delete",
+            "/account/%64elete",
+            "/account/%2564elete",
+            "/account%2Fdelete",
+            "/account/delete?x=1",
+            "/account/delete/?x=1",
+            "/account/delete;jsessionid=1",
+            "/account/delete%3Bx=1",
+            "/%61ccount\\delete",
+        ] {
+            assert!(
+                manifest.is_protected("POST", &url(&format!("https://app.example.test{path}"))),
+                "{path}"
+            );
+            assert!(
+                !manifest.is_protected("GET", &url(&format!("https://app.example.test{path}"))),
+                "a GET is not a POST: {path}"
+            );
+        }
+        for path in [
+            "/account",
+            "/account/deleted",
+            "/account/delete/x",
+            "/delete",
+        ] {
+            assert!(
+                !manifest.is_protected("POST", &url(&format!("https://app.example.test{path}"))),
+                "{path}"
+            );
+        }
+        // The same slash and case rules apply to the `*/logout` pattern, queries included.
+        assert!(manifest.is_protected("POST", &url("https://app.example.test/Logout/?next=/")));
+        assert!(manifest.is_protected("post", &url("https://app.example.test/x/../LOGOUT")));
+        // A pattern may name a query.
+        let text = SAMPLE.replace("* /account/delete*", "* /search?q=*");
+        let manifest = Manifest::parse(&text).unwrap();
+        assert!(manifest.is_protected("GET", &url("https://app.example.test/Search?q=Boots")));
+        assert!(!manifest.is_protected("GET", &url("https://app.example.test/search?p=1")));
+    }
+
+    #[test]
+    fn host_patterns_match_idn_names_by_their_punycode_and_accept_bracketed_ipv6() {
+        let text = SAMPLE.replace(
+            "[impact]",
+            "[[scope]]\nhost = \"b\u{fc}cher.example\"\nmode = \"blocked\"\n\n\
+             [[scope]]\nhost = \"*.example\"\nmode = \"attack\"\n\n\
+             [[scope]]\nhost = \"[::1]\"\nmode = \"attack\"\n\n\
+             [[scope]]\nhost = \"[::1]:8080\"\nmode = \"blocked\"\n\n[impact]",
+        );
+        let manifest = Manifest::parse(&text).unwrap();
+        for host in ["xn--bcher-kva.example", "B\u{dc}CHER.example"] {
+            assert_eq!(
+                manifest.host_mode(&url(&format!("https://{host}/"))),
+                Some(HostMode::Blocked),
+                "{host}: a blocked entry wins over the wildcard"
+            );
+        }
+        assert_eq!(
+            manifest.host_mode(&url("https://other.example/")),
+            Some(HostMode::Attack)
+        );
+        assert_eq!(
+            manifest.host_mode(&url("http://[::1]/")),
+            Some(HostMode::Attack)
+        );
+        assert_eq!(
+            manifest.host_mode(&url("http://[::1]:8080/")),
+            Some(HostMode::Blocked)
+        );
+        assert_eq!(manifest.host_mode(&url("http://[::2]/")), None);
+        for bad in [
+            "[::1",
+            "[::1]x",
+            "::1",
+            "*.[::1]",
+            "[::1]:99999",
+            "a b.test",
+        ] {
+            let text = SAMPLE.replace("app.example.test", bad);
+            assert!(Manifest::parse(&text).is_err(), "{bad}");
+        }
     }
 
     #[test]

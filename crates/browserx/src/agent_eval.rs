@@ -607,10 +607,12 @@ async fn run_case(
         .iter()
         .map(|(name, f)| (name.clone(), f.hits().len()))
         .collect();
+    // Every case is its own principal: ledger flags, call budgets and plan progress belong to
+    // the principal, so a case starts with a clean context whatever ran before it.
     let transport = Transport {
         name: "stdio",
         remote: None,
-        principal: None,
+        principal: Some(format!("eval:{}", case.id)),
     };
     let call = |name: &str, args: Value, extra: Value| {
         let mut params = json!({ "name": name, "arguments": args });
@@ -630,7 +632,6 @@ async fn run_case(
             }
         }
     };
-    let _ = call("reset_context", json!({}), json!({})).await;
     let created = call(
         "create_session",
         json!({"launch_profile": "default"}),

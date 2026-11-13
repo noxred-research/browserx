@@ -3,6 +3,8 @@
 
 // Remove once the action gate calls these; until then only the tests do.
 
+use std::collections::{BTreeSet, HashMap, HashSet};
+
 use serde_json::{Value, json};
 
 use super::conn::{Conn, TabRef};
@@ -14,13 +16,24 @@ const NAME_CAP: u32 = 160;
 /// The longest URL returned, in UTF-16 units.
 const URL_CAP: u32 = 2048;
 
+/// Name of the isolated world the description runs in.
+const WORLD: &str = "browserx-element-features";
+/// Most frames whose world is tried when looking for the one an element lives in.
+const MAX_WORLD_FRAMES: usize = 16;
+/// Most frame owner elements looked at when listing the origins of a page's frames.
+const MAX_FRAME_OWNERS: usize = 4096;
+
 /// Describes `this` (an element) as a JSON object shaped like [`Features`].
 ///
-/// The page is untrusted, so the script uses attribute reads (`getAttribute`) instead of the
-/// form properties a hostile page can shadow with a field named `action`; every URL is resolved
-/// against the document's base and clipped; the form is the element's own form or the closest
-/// `form` ancestor. When the element is not itself a control (a `span` inside a link or button)
-/// the closest enclosing actuator is described, because that is what a click activates.
+/// The page is untrusted, so the script runs in an isolated world (its own copy of every
+/// built-in: nothing the page patches or shadows on `Element`, `URL` or `document` reaches it),
+/// uses attribute reads (`getAttribute`) instead of the form properties a hostile page can shadow
+/// with a field named `action`, and takes `type` from the DOM property, which is what the browser
+/// acts on (`<button type="foo">` submits). Every URL is resolved against the document's base and
+/// clipped; the form is the element's own form or the closest `form` ancestor. When the element
+/// is not itself a control (a `span` inside a link or button) the closest enclosing actuator is
+/// described, because that is what a click activates. A field's `formaction` and `formmethod` are
+/// those of its form's default button, the one Enter in the field presses.
 const ELEMENT_FEATURES: &str = r#"function (nameCap, urlCap) {
   function clip(text, max) {
     text = text == null ? '' : String(text);
@@ -39,7 +52,7 @@ const ELEMENT_FEATURES: &str = r#"function (nameCap, urlCap) {
     if (actuator) { el = actuator; }
   }
   var tag = lower(el.tagName);
-  var type = (tag === 'input' || tag === 'button') ? lower(attr(el, 'type') || el.type) : '';
+  var type = (tag === 'input' || tag === 'button') ? lower(el.type) : '';
   if (tag === 'input' && type === '') { type = 'text'; }
   var form = el.form || el.closest('form');
   function implicitRole() {
@@ -117,6 +130,17 @@ const ELEMENT_FEATURES: &str = r#"function (nameCap, urlCap) {
     hasFile = form.querySelector('input[type="file" i]') !== null;
   }
   var submitter = tag === 'button' || (tag === 'input' && (type === 'submit' || type === 'image'));
+  var formElements = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'elements').get;
+  function defaultButton(owner) {
+    var list = formElements.call(owner);
+    for (var i = 0; i < list.length; i++) {
+      var node = list[i];
+      if ((node.tagName === 'BUTTON' && node.type === 'submit') ||
+          (node.tagName === 'INPUT' && (node.type === 'submit' || node.type === 'image'))) { return node; }
+    }
+    return null;
+  }
+  var presser = submitter ? el : (form ? defaultButton(form) : null);
   var ids = [];
   if (attr(el, 'id')) { ids.push(attr(el, 'id')); }
   if (attr(el, 'name')) { ids.push(attr(el, 'name')); }
@@ -130,8 +154,8 @@ const ELEMENT_FEATURES: &str = r#"function (nameCap, urlCap) {
     form_action: action,
     form_method: form ? formMethod : null,
     form_enctype: enctype,
-    formaction: submitter ? absolute(attr(el, 'formaction')) : null,
-    formmethod: submitter ? method(attr(el, 'formmethod')) : null,
+    formaction: presser ? absolute(attr(presser, 'formaction')) : null,
+    formmethod: presser ? method(attr(presser, 'formmethod')) : null,
     in_form: !!form,
     form_has_password: hasPassword,
     form_has_file_input: hasFile,
@@ -166,6 +190,15 @@ fn parse(value: Value) -> ToolResult<Features> {
     })
 }
 
+/// The origins of the frames of a page, and how many frames have none that can be told.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct FrameOrigins {
+    /// Origins of the http(s) frames, the page's own included.
+    pub origins: Vec<String>,
+    /// Frames in another process whose URL the browser did not report.
+    pub unknown: usize,
+}
+
 impl Conn {
     /// The URL the tab is at, as last reported by the browser (no round trip).
     pub(crate) fn tab_url(&self, tab: &TabRef) -> String {
@@ -176,40 +209,126 @@ impl Conn {
             .unwrap_or_default()
     }
 
-    /// The origins of every frame of the page, the page's own included (from the frame tree).
-    pub(crate) async fn frame_origins(&self, tab: &TabRef) -> ToolResult<Vec<String>> {
+    /// The frames of the tab that share its process, the main frame first (bounded).
+    async fn frame_ids(&self, tab: &TabRef) -> ToolResult<Vec<String>> {
         let tree = self.call(tab, "Page.getFrameTree", json!({})).await?;
-        let mut origins = Vec::new();
+        let mut ids = Vec::new();
+        let mut queue = std::collections::VecDeque::from([&tree["frameTree"]]);
+        while let Some(node) = queue.pop_front() {
+            if let Some(id) = node["frame"]["id"].as_str()
+                && ids.len() < MAX_WORLD_FRAMES
+            {
+                ids.push(id.to_owned());
+            }
+            queue.extend(node["childFrames"].as_array().into_iter().flatten());
+        }
+        Ok(ids)
+    }
+
+    /// The isolated world of a frame: an execution context with its own copy of every built-in.
+    /// The browser keeps one per frame and name, so asking again returns the same one.
+    async fn isolated_context(&self, tab: &TabRef, frame_id: &str) -> ToolResult<i64> {
+        let reply = self
+            .call(
+                tab,
+                "Page.createIsolatedWorld",
+                json!({ "frameId": frame_id, "worldName": WORLD }),
+            )
+            .await?;
+        reply["executionContextId"]
+            .as_i64()
+            .ok_or_else(|| ToolError::browser("the browser did not create an isolated world"))
+    }
+
+    /// The origins of every frame of the page, the page's own included. Frames in another
+    /// process are not in the frame tree: they are found through their owner elements and the
+    /// browser's iframe targets, and one whose URL is not known is counted, not skipped.
+    pub(crate) async fn frame_origins(&self, tab: &TabRef) -> ToolResult<FrameOrigins> {
+        let tree = self.call(tab, "Page.getFrameTree", json!({})).await?;
+        let mut known: HashSet<String> = HashSet::new();
+        let mut origins: BTreeSet<String> = BTreeSet::new();
         let mut stack = vec![&tree["frameTree"]];
         while let Some(node) = stack.pop() {
-            if let Some(url) = node["frame"]["url"].as_str()
-                && let Ok(parsed) = url::Url::parse(url)
-                && matches!(parsed.scheme(), "http" | "https")
-            {
-                origins.push(parsed.origin().ascii_serialization());
+            if let Some(id) = node["frame"]["id"].as_str() {
+                known.insert(id.to_owned());
             }
-            for child in node["childFrames"].as_array().into_iter().flatten() {
-                stack.push(child);
+            if let Some(url) = node["frame"]["url"].as_str() {
+                origins.extend(http_origin(url));
+            }
+            stack.extend(node["childFrames"].as_array().into_iter().flatten());
+        }
+        let document = self
+            .call(
+                tab,
+                "DOM.getFlattenedDocument",
+                json!({ "depth": -1, "pierce": true }),
+            )
+            .await?;
+        let mut targets: Option<HashMap<String, String>> = None;
+        let mut unknown = 0;
+        let mut seen = HashSet::new();
+        for node in document["nodes"].as_array().into_iter().flatten() {
+            let Some(frame_id) = node["frameId"].as_str() else {
+                continue;
+            };
+            if known.contains(frame_id) || !seen.insert(frame_id.to_owned()) {
+                continue;
+            }
+            if seen.len() > MAX_FRAME_OWNERS {
+                unknown += 1;
+                continue;
+            }
+            let targets = match &mut targets {
+                Some(targets) => targets,
+                none => none.insert(self.iframe_targets().await),
+            };
+            match targets.get(frame_id) {
+                Some(url) => match http_origin(url) {
+                    Some(origin) => {
+                        origins.insert(origin);
+                    }
+                    // `about:`, `data:` and `blob:` documents carry no origin of their own
+                    // to withhold; the owner's is already counted.
+                    None if url.starts_with("about:") => {}
+                    None => unknown += 1,
+                },
+                None => unknown += 1,
             }
         }
-        origins.sort();
-        origins.dedup();
-        Ok(origins)
+        Ok(FrameOrigins {
+            origins: origins.into_iter().collect(),
+            unknown,
+        })
     }
 
     /// Describes the element behind `backend` (a DOM backend node id) for the action classifier.
+    /// The description runs in an isolated world, out of reach of the page's own scripts.
     pub(crate) async fn element_features(
         &self,
         tab: &TabRef,
         backend: i64,
     ) -> ToolResult<Features> {
-        let object = self
-            .call(tab, "DOM.resolveNode", json!({ "backendNodeId": backend }))
-            .await?;
-        let object_id = object["object"]["objectId"]
-            .as_str()
-            .ok_or_else(|| ToolError::browser("the element cannot be resolved"))?
-            .to_owned();
+        let mut object_id = None;
+        for frame in self.frame_ids(tab).await? {
+            // The node can only be resolved in the world of the frame it belongs to.
+            let Ok(context) = self.isolated_context(tab, &frame).await else {
+                continue;
+            };
+            if let Ok(object) = self
+                .call(
+                    tab,
+                    "DOM.resolveNode",
+                    json!({ "backendNodeId": backend, "executionContextId": context }),
+                )
+                .await
+                && let Some(id) = object["object"]["objectId"].as_str()
+            {
+                object_id = Some(id.to_owned());
+                break;
+            }
+        }
+        let object_id =
+            object_id.ok_or_else(|| ToolError::browser("the element cannot be resolved"))?;
         let reply = self
             .call(
                 tab,
@@ -232,11 +351,28 @@ impl Conn {
 
     /// Describes the focused element, or `None` when the page itself has focus.
     pub(crate) async fn focused_features(&self, tab: &TabRef) -> ToolResult<Option<Features>> {
-        match self.eval(tab, &focused_expression(), 2000).await? {
+        let main = self
+            .frame_ids(tab)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ToolError::browser("the page has no frame"))?;
+        let context = self.isolated_context(tab, &main).await?;
+        match self
+            .eval_in(tab, &focused_expression(), 2000, Some(context))
+            .await?
+        {
             Value::Null => Ok(None),
             value => parse(value).map(Some),
         }
     }
+}
+
+fn http_origin(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()
+        .filter(|parsed| matches!(parsed.scheme(), "http" | "https"))
+        .map(|parsed| parsed.origin().ascii_serialization())
 }
 
 #[cfg(test)]
@@ -275,7 +411,33 @@ mod tests {
         "<a id=\"docs\" href=\"/docs\" download>Manual</a>",
         "<button id=\"menu\" type=\"button\" aria-expanded=\"false\" aria-controls=\"m\">Menu</button>",
         "<button id=\"js\" type=\"button\">Continue</button>",
+        // A search form whose default (first) button posts elsewhere: Enter in the field sends
+        // that request, not the form's own.
+        "<form id=\"search2\" action=\"/search\" method=\"get\"><input id=\"q2\" name=\"q\" type=\"search\" aria-label=\"Search\">",
+        "<button id=\"first\" type=\"submit\" formmethod=\"post\" formaction=\"/account/delete\">Find</button>",
+        "<button id=\"second\" type=\"submit\">Other</button></form>",
+        // The browser submits with a button whose `type` it does not know.
+        "<form id=\"odd-form\" action=\"/account/delete\" method=\"post\"><button id=\"odd\" type=\"foo\">Proceed</button></form>",
         "<script>document.getElementById('inner').dataset.x = '1';</script>",
+        "</main></body></html>"
+    );
+
+    /// The forms of [`PAGE`] under a script that patches the DOM API the way a hostile page would.
+    const HOSTILE: &str = concat!(
+        "<!doctype html><html><head><title>Hostile</title></head><body><main>",
+        "<form id=\"del\" action=\"/account/delete\" method=\"POST\"><button id=\"cancel\" type=\"submit\">Cancel</button></form>",
+        "<form id=\"login\" action=\"/login\" method=\"post\">",
+        "<input id=\"user\" name=\"user\" type=\"text\" autocomplete=\"username\" aria-label=\"Email\">",
+        "<input id=\"pass\" type=\"password\" aria-label=\"Password\"><button id=\"signin\">Sign in</button></form>",
+        "<script>",
+        "Element.prototype.getAttribute = function () { return null; };",
+        "Element.prototype.closest = function () { return null; };",
+        "Element.prototype.hasAttribute = function () { return false; };",
+        "Object.defineProperty(Document.prototype, 'baseURI', { get: function () { return 'about:blank'; } });",
+        "window.URL = function () { throw new Error('patched'); };",
+        "Object.defineProperty(HTMLButtonElement.prototype, 'type', { get: function () { return 'button'; } });",
+        "Object.defineProperty(Object.getPrototypeOf(HTMLInputElement.prototype), 'form', { get: function () { return null; } });",
+        "</script>",
         "</main></body></html>"
     );
 
@@ -289,10 +451,13 @@ mod tests {
                 };
                 tokio::spawn(async move {
                     let mut buffer = vec![0u8; 4096];
-                    let _ = stream.read(&mut buffer).await;
+                    let read = stream.read(&mut buffer).await.unwrap_or(0);
+                    let hostile =
+                        String::from_utf8_lossy(&buffer[..read]).starts_with("GET /hostile");
+                    let page = if hostile { HOSTILE } else { PAGE };
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PAGE}",
-                        PAGE.len()
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+                        page.len()
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
                     let _ = stream.shutdown().await;
@@ -479,6 +644,138 @@ mod tests {
             ActionClass::CredentialEntry
         );
 
+        conn.close().await;
+        let _ = browser.kill().await;
+    }
+
+    async fn open_fixture(
+        scratch: &std::path::Path,
+        path: &str,
+    ) -> Option<(Child, Conn, TabRef, String)> {
+        let (browser, endpoint) = launch(scratch).await?;
+        let origin = fixture().await;
+        let scope = Arc::new(Scope::new(vec![origin.clone()], true, Window::default()));
+        let conn = Conn::connect(&endpoint, Limits::default(), scope)
+            .await
+            .unwrap();
+        let tab = conn.tab(None).await.unwrap();
+        conn.call(
+            &tab,
+            "Page.navigate",
+            json!({ "url": format!("{origin}{path}") }),
+        )
+        .await
+        .unwrap();
+        conn.wait_settled(&tab, Duration::from_millis(300)).await;
+        Some((browser, conn, tab, origin))
+    }
+
+    #[tokio::test]
+    async fn enter_in_a_field_is_described_by_the_button_the_browser_presses() {
+        let scratch = tempfile::tempdir().unwrap();
+        let Some((mut browser, conn, tab, origin)) = open_fixture(scratch.path(), "/").await else {
+            return;
+        };
+        let inside = |url: &str| url == origin || url.starts_with(&format!("{origin}/"));
+        // The default button of the form overrides the form's GET: the search form posts.
+        let field = conn
+            .element_features(&tab, backend_of(&conn, &tab, "#q2").await)
+            .await
+            .unwrap();
+        assert_eq!(field.form_method.as_deref(), Some("get"));
+        assert_eq!(field.formmethod.as_deref(), Some("post"));
+        assert_eq!(
+            field.formaction.as_deref(),
+            Some(format!("{origin}/account/delete").as_str())
+        );
+        for intent in [Intent::TypeText { submit: true }, Intent::PressEnter] {
+            let got = classify(&field, intent, &inside);
+            assert_eq!(got.class, ActionClass::Destructive, "{intent:?}: {got:?}");
+        }
+        // A field of a form whose default button has no override keeps the form's own method.
+        let plain = conn
+            .element_features(&tab, backend_of(&conn, &tab, "#q").await)
+            .await
+            .unwrap();
+        assert_eq!((plain.formaction, plain.formmethod), (None, None));
+        // The second button is not the default one.
+        let second = conn
+            .element_features(&tab, backend_of(&conn, &tab, "#second").await)
+            .await
+            .unwrap();
+        assert_eq!((second.formaction, second.formmethod), (None, None));
+        conn.close().await;
+        let _ = browser.kill().await;
+    }
+
+    #[tokio::test]
+    async fn a_button_with_an_unknown_type_is_a_submit_button_as_the_browser_treats_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let Some((mut browser, conn, tab, origin)) = open_fixture(scratch.path(), "/").await else {
+            return;
+        };
+        let inside = |url: &str| url == origin || url.starts_with(&format!("{origin}/"));
+        let odd = conn
+            .element_features(&tab, backend_of(&conn, &tab, "#odd").await)
+            .await
+            .unwrap();
+        assert_eq!(odd.input_type, "submit");
+        assert_eq!(
+            classify(&odd, Intent::Click, &inside).class,
+            ActionClass::Destructive
+        );
+        conn.close().await;
+        let _ = browser.kill().await;
+    }
+
+    #[tokio::test]
+    async fn a_page_cannot_lower_a_class_by_patching_the_dom_api() {
+        let scratch = tempfile::tempdir().unwrap();
+        let Some((mut browser, conn, tab, origin)) = open_fixture(scratch.path(), "/hostile").await
+        else {
+            return;
+        };
+        let inside = |url: &str| url == origin || url.starts_with(&format!("{origin}/"));
+        // The script patched `getAttribute`, `closest`, `hasAttribute`, `URL`, `baseURI`, the
+        // `type` of buttons and the `form` of controls in the page's world.
+        let patched = conn
+            .eval(
+                &tab,
+                "document.getElementById('cancel').getAttribute('type')",
+                2000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(patched, Value::Null, "the page's world is patched");
+        let cancel = conn
+            .element_features(&tab, backend_of(&conn, &tab, "#cancel").await)
+            .await
+            .unwrap();
+        assert_eq!(cancel.form_method.as_deref(), Some("post"), "{cancel:?}");
+        assert_eq!(cancel.input_type, "submit");
+        assert_eq!(
+            cancel.form_action.as_deref(),
+            Some(format!("{origin}/account/delete").as_str())
+        );
+        assert_eq!(
+            classify(&cancel, Intent::Click, &inside).class,
+            ActionClass::Destructive
+        );
+        let signin = conn
+            .element_features(&tab, backend_of(&conn, &tab, "#signin").await)
+            .await
+            .unwrap();
+        assert!(signin.form_has_password, "{signin:?}");
+        // The focused element is described the same way.
+        conn.eval(&tab, "document.getElementById('user').focus()", 2000)
+            .await
+            .unwrap();
+        let focused = conn.focused_features(&tab).await.unwrap().unwrap();
+        assert_eq!(focused.autocomplete, "username");
+        assert_eq!(
+            classify(&focused, Intent::PressEnter, &inside).class,
+            ActionClass::CredentialEntry
+        );
         conn.close().await;
         let _ = browser.kill().await;
     }

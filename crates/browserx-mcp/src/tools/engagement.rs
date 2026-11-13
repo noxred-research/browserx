@@ -11,6 +11,7 @@ use time::format_description::well_known::Rfc3339;
 use super::{Args, Call, Output};
 use crate::ctx::Ctx;
 use crate::error::{ToolError, ToolResult};
+use crate::gate;
 use crate::grants::{Ceiling, Grant, proposal_summary};
 
 fn resolve(ctx: &Ctx, call: &Call<'_>, args: &Args) -> ToolResult<String> {
@@ -80,20 +81,24 @@ pub(super) fn status(ctx: &Arc<Ctx>, call: &Call<'_>, args: &Args) -> ToolResult
         "calls": state.calls,
         "manifest": manifest,
         "grant": grant,
-        "advice": "Flags only turn on within a handle. reset_context starts a fresh handle and context; do that, and tell the user, before work that does not need what this session has seen.",
+        "advice": "Flags only turn on within a handle. reset_context starts a fresh handle and context (it needs a human approval once this handle holds untrusted input or sensitive context, and the strict policy refuses it); ask for that, and tell the user, before work that does not need what this session has seen.",
     })))
 }
 
-pub(super) fn reset(ctx: &Arc<Ctx>, call: &Call<'_>) -> ToolResult {
+pub(super) async fn reset(ctx: &Arc<Ctx>, call: &Call<'_>) -> ToolResult {
+    gate::authorize_reset(ctx, call)?;
     let old = call.handle.clone();
     let fresh = ctx.ledger.reset(call.principal);
+    // Element refs and snapshots of the retired context stop resolving: the new context reads
+    // the page again before it can act on it.
+    ctx.hub.forget_refs().await;
     call.note("retired_handle", json!(old));
     let state = ctx.ledger.status(&fresh);
     Ok(Output::json(json!({
         "handle": fresh,
         "flags": state.map(|s| s.flags.to_value()),
         "retired": true,
-        "note": "The previous handle is retired and unusable. Start the next task with a fresh context window: what you read before is not forgotten by this call.",
+        "note": "The previous handle is retired and unusable, and every element ref is invalid: take a new page_snapshot. Start the next task with a fresh context window: what you read before is not forgotten by this call. Calls and plan steps already used still count against the scope grant.",
     })))
 }
 

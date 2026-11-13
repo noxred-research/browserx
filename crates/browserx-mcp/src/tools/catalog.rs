@@ -65,7 +65,13 @@ impl ToolDef {
     pub fn approvable(&self) -> bool {
         matches!(
             self.name,
-            "open_page" | "click" | "type_text" | "press_key" | "select_option" | "evaluate_js"
+            "open_page"
+                | "click"
+                | "type_text"
+                | "press_key"
+                | "select_option"
+                | "evaluate_js"
+                | "reset_context"
         )
     }
 
@@ -921,7 +927,7 @@ Text hidden from users (zero size, transparent, same colour as its background, o
         None,
         false,
         "reset_context",
-        "Retires your engagement handle and mints a fresh one with clean flags. This is the only way to clear what this session has seen; start the next task with a fresh context window as well.".to_owned(),
+        "Retires your engagement handle and mints a fresh one with clean flags, and invalidates every element ref. This is the only way to clear what this session has seen; start the next task with a fresh context window as well. Once this handle holds untrusted input or sensitive context, the reset needs a human approval (the strict policy refuses it), and the calls and plan steps already used still count against the scope grant.".to_owned(),
         schema(vec![], &[]),
     );
     let origin_list = |description: &str| json!({ "type": "array", "description": description, "maxItems": 64, "items": { "type": "string", "maxLength": 200 } });

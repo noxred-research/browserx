@@ -272,9 +272,11 @@ pub struct Features {
     pub form_method: Option<String>,
     /// The `enctype` of the enclosing form.
     pub form_enctype: Option<String>,
-    /// The `formaction` of the element itself, absolute.
+    /// The `formaction` of the element itself, absolute; for an element that is not a button, the
+    /// one of its form's default button, which Enter in the element presses.
     pub formaction: Option<String>,
-    /// The `formmethod` of the element itself, lower case.
+    /// The `formmethod` of the element itself, lower case; for an element that is not a button,
+    /// the one of its form's default button.
     pub formmethod: Option<String>,
     /// Whether the element is inside a form.
     pub in_form: bool,

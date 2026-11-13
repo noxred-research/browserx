@@ -35,6 +35,9 @@ async fn connect(ctx: &Arc<Ctx>, call: &Call<'_>, args: &Args) -> ToolResult<(Ha
             "an adopted session (its state is not known to be clean) is in use",
         );
     }
+    if let Some(reason) = &managed.sensitive {
+        ctx.ledger.mark(&call.handle, Flag::B, reason);
+    }
     let handle = ctx
         .hub
         .connection(&id, &managed.token, &ctx.backend)
@@ -373,7 +376,17 @@ pub(super) async fn screenshot(ctx: &Arc<Ctx>, call: &Call<'_>, args: &Args) -> 
     if ctx.scope.grant().is_some() {
         // Pixels cannot be filtered by origin: a frame the grant does not let the session read
         // would be in the image.
-        for origin in handle.frame_origins(&tab).await? {
+        let frames = handle.frame_origins(&tab).await?;
+        if frames.unknown > 0 {
+            return Err(ToolError::refused_with(
+                "frame_not_in_ro",
+                format!(
+                    "the page embeds {} frame(s) whose origin the browser did not report: a screenshot could show content the scope grant does not let this session read",
+                    frames.unknown
+                ),
+            ));
+        }
+        for origin in frames.origins {
             if !ctx.scope.read_allowed(&origin) {
                 return Err(ToolError::refused_with(
                     "frame_not_in_ro",

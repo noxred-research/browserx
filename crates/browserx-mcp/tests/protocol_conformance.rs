@@ -197,7 +197,7 @@ async fn the_legacy_vectors_pass() {
 
 #[tokio::test]
 async fn the_modern_vectors_pass() {
-    assert!(run_pack("modern.json").await >= 14);
+    assert!(run_pack("modern.json").await >= 16);
 }
 
 #[tokio::test]

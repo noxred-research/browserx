@@ -321,6 +321,55 @@
       }
     },
     {
+      "id": "modern-header-with-a-body-that-does-not-declare-it",
+      "description": "a header that names the modern revision binds the request: a body without the version in _meta is not served as a legacy call under a different Mcp-Method",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/list"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "explain_error",
+          "arguments": {
+            "code": "stale_generation"
+          }
+        }
+      },
+      "expect": {
+        "status": 400,
+        "error_code": -32020
+      }
+    },
+    {
+      "id": "modern-header-with-a-body-of-the-legacy-era",
+      "description": "the header names 2026-07-28 but the body declares 2025-06-18",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/list"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "explain_error",
+          "arguments": {
+            "code": "stale_generation"
+          },
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2025-06-18"
+          }
+        }
+      },
+      "expect": {
+        "status": 400,
+        "error_code": -32020
+      }
+    },
+    {
       "id": "modern-missing-name-header",
       "description": "tools/call without Mcp-Name is a header mismatch",
       "headers": {

@@ -89,12 +89,14 @@ impl Output {
         self
     }
 
-    /// Whether the output carries page-derived text (flag A of the Rule of Two).
+    /// Whether the output carries page-derived content (flag A of the Rule of Two): text, or
+    /// pixels of the page, which a model reads just as well and a page can fill with
+    /// instructions.
     #[must_use]
     pub fn has_untrusted(&self) -> bool {
         self.blocks
             .iter()
-            .any(|block| matches!(block, Block::Untrusted { .. }))
+            .any(|block| matches!(block, Block::Untrusted { .. } | Block::Image { .. }))
     }
 
     /// The MCP `tools/call` result: redacted, wrapped and bounded to `max_bytes` per text block.
@@ -167,7 +169,7 @@ pub fn error_result(ctx: &Ctx, error: &ToolError, max_bytes: usize) -> Value {
 }
 
 /// `text` cut to at most `max_bytes` at a character boundary, with a notice when cut.
-fn truncated(text: &str, max_bytes: usize) -> String {
+pub(crate) fn truncated(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_owned();
     }
@@ -524,7 +526,7 @@ async fn execute(ctx: &Arc<Ctx>, name: &str, call: &Call<'_>, args: &Args) -> To
         "list_launch_profiles" => monitor::list_launch_profiles(ctx).await,
         "list_snapshots" => monitor::list_snapshots(ctx, args).await,
         "engagement_status" => engagement::status(ctx, call, args),
-        "reset_context" => engagement::reset(ctx, call),
+        "reset_context" => engagement::reset(ctx, call).await,
         "propose_scope_grant" => engagement::propose(ctx, call, args),
         "create_session" => manage::create_session(ctx, call, args).await,
         "renew_session" => manage::renew_session(ctx, args).await,
@@ -630,6 +632,14 @@ mod tests {
                 .unwrap()
                 .contains("bxt_0123456789abcdef0123456789")
         );
+    }
+
+    #[test]
+    fn pixels_of_a_page_count_as_untrusted_input_like_its_text() {
+        let meta = json!({"session_id": "ses_1"});
+        assert!(Output::image(&meta, "image/png", "AAAA").has_untrusted());
+        assert!(Output::page(&meta, "https://a.test", "text").has_untrusted());
+        assert!(!Output::json(meta).has_untrusted());
     }
 
     #[test]

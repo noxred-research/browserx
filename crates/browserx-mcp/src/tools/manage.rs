@@ -124,11 +124,6 @@ pub(super) async fn create_session(
     } else {
         out
     };
-    ctx.registry.insert(Managed {
-        id,
-        token: created.token,
-        adopted: false,
-    });
     let reason = match (
         args.str("persistence"),
         args.str("profile_id"),
@@ -145,6 +140,12 @@ pub(super) async fn create_session(
         ctx.ledger
             .mark(&call.handle, crate::ledger::Flag::B, reason);
     }
+    ctx.registry.insert(Managed {
+        id,
+        token: created.token,
+        adopted: false,
+        sensitive: reason.map(str::to_owned),
+    });
     Ok(out)
 }
 
@@ -227,6 +228,7 @@ pub(super) async fn handoff_session(ctx: &Arc<Ctx>, args: &Args) -> ToolResult {
         id,
         token: created.token,
         adopted: managed.adopted,
+        sensitive: managed.sensitive,
     });
     Ok(out)
 }

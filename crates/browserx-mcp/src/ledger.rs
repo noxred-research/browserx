@@ -8,7 +8,11 @@
 //! The ledger keeps one entry per *handle*, a server-minted opaque id bound to the principal
 //! that created it. Flags only ever turn on within a handle: nothing, and no model, clears one.
 //! `reset_context` mints a fresh handle and retires the old one, which is the only way to start
-//! again. The ledger is in memory: a restarted server treats every old handle as unknown.
+//! again; the gate asks a human before it runs once the handle holds untrusted input or sensitive
+//! context (`enforce`) and refuses it under `strict`. The call count, the time budget and the
+//! progress through a grant's plan are not part of a handle: they belong to the principal (the
+//! grant is one per server), so a fresh handle starts with a clean context but never with a fresh
+//! budget. The ledger is in memory: a restarted server treats every old handle as unknown.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -91,9 +95,16 @@ struct Entry {
     principal: String,
     flags: Flags,
     reasons: [Vec<String>; 3],
-    plan: PlanProgress,
+}
+
+/// What a principal has spent against the scope grant. It outlives every handle of the
+/// principal, so `reset_context` cannot refill a budget or rewind a plan. Principals are the
+/// operator's authenticated callers (`stdio` or one per bearer token), a handful per server.
+#[derive(Debug, Default)]
+struct Usage {
     calls: u64,
     first_call: Option<Instant>,
+    plan: PlanProgress,
 }
 
 #[derive(Debug, Default)]
@@ -101,6 +112,7 @@ struct Inner {
     handles: HashMap<String, Entry>,
     defaults: HashMap<String, String>,
     order: VecDeque<String>,
+    usage: HashMap<String, Usage>,
 }
 
 /// The ledger.
@@ -171,9 +183,6 @@ impl Ledger {
                 ..Flags::default()
             },
             reasons: [Vec::new(), Vec::new(), Vec::new()],
-            plan: PlanProgress::default(),
-            calls: 0,
-            first_call: None,
         };
         if self.c_enabled {
             entry.reasons[2].push("a tool that changes pages is enabled".into());
@@ -259,11 +268,12 @@ impl Ledger {
     /// A copy of a handle's state.
     #[must_use]
     pub fn status(&self, handle: &str) -> Option<Status> {
-        self.lock().handles.get(handle).map(|e| Status {
+        let inner = self.lock();
+        inner.handles.get(handle).map(|e| Status {
             handle: handle.to_owned(),
             flags: e.flags,
             reasons: e.reasons.clone(),
-            calls: e.calls,
+            calls: inner.usage.get(&e.principal).map_or(0, |u| u.calls),
         })
     }
 
@@ -281,15 +291,18 @@ impl Ledger {
         }
     }
 
-    /// Counts one call and returns the calls so far and the seconds since the first.
+    /// Counts one call of the handle's principal and returns the calls so far and the seconds
+    /// since the first. A reset does not restart either.
     pub fn count_call(&self, handle: &str) -> (u64, u64) {
         let mut inner = self.lock();
-        let Some(entry) = inner.handles.get_mut(handle) else {
+        let Inner { handles, usage, .. } = &mut *inner;
+        let Some(entry) = handles.get(handle) else {
             return (0, 0);
         };
-        entry.calls = entry.calls.saturating_add(1);
-        let first = *entry.first_call.get_or_insert_with(Instant::now);
-        (entry.calls, first.elapsed().as_secs())
+        let used = usage.entry(entry.principal.clone()).or_default();
+        used.calls = used.calls.saturating_add(1);
+        let first = *used.first_call.get_or_insert_with(Instant::now);
+        (used.calls, first.elapsed().as_secs())
     }
 
     /// Checks a call against the plan without consuming a step.
@@ -302,18 +315,26 @@ impl Ledger {
         origin: &str,
         class: &str,
     ) -> PlanVerdict {
-        self.lock()
-            .handles
-            .get(handle)
-            .map_or(PlanVerdict::Outside, |entry| {
-                entry.plan.check(plan, tool, origin, class)
-            })
+        let inner = self.lock();
+        let Some(entry) = inner.handles.get(handle) else {
+            return PlanVerdict::Outside;
+        };
+        match inner.usage.get(&entry.principal) {
+            Some(used) => used.plan.check(plan, tool, origin, class),
+            None => PlanProgress::default().check(plan, tool, origin, class),
+        }
     }
 
-    /// Consumes a plan step.
+    /// Consumes a plan step of the handle's principal.
     pub fn plan_consume(&self, handle: &str, plan_len: usize, index: usize) {
-        if let Some(entry) = self.lock().handles.get_mut(handle) {
-            entry.plan.consume(plan_len, index);
+        let mut inner = self.lock();
+        let Inner { handles, usage, .. } = &mut *inner;
+        if let Some(entry) = handles.get(handle) {
+            usage
+                .entry(entry.principal.clone())
+                .or_default()
+                .plan
+                .consume(plan_len, index);
         }
     }
 }
@@ -455,5 +476,41 @@ mod tests {
         let status = ledger.status(&handle).unwrap();
         assert_eq!(status.reasons[1], vec!["adopted session".to_owned()]);
         assert_eq!(status.calls, 2);
+    }
+    #[test]
+    fn a_reset_keeps_the_call_count_and_the_plan_progress_of_the_principal() {
+        use crate::grants::PlanStep;
+        let ledger = Ledger::new(RuleOfTwoMode::Off, false);
+        let first = ledger.current("p");
+        assert_eq!(ledger.count_call(&first).0, 1);
+        assert_eq!(ledger.count_call(&first).0, 2);
+        let plan = vec![PlanStep {
+            tool: "click".into(),
+            origin: "*".into(),
+            action_class: "*".into(),
+            max_count: 1,
+        }];
+        let check =
+            |handle: &str| ledger.plan_check(handle, &plan, "click", "https://a.test", "read");
+        assert_eq!(check(&first), PlanVerdict::Matches(0));
+        ledger.plan_consume(&first, 1, 0);
+        assert_eq!(check(&first), PlanVerdict::Outside);
+
+        let fresh = ledger.reset("p");
+        assert_ne!(fresh, first);
+        assert_eq!(ledger.count_call(&fresh).0, 3, "the budget is not refilled");
+        assert_eq!(
+            check(&fresh),
+            PlanVerdict::Outside,
+            "the plan is not rewound"
+        );
+        assert_eq!(ledger.status(&fresh).unwrap().calls, 3);
+        let other = ledger.current("q");
+        assert_eq!(
+            ledger.count_call(&other).0,
+            1,
+            "another principal has its own"
+        );
+        assert_eq!(check(&other), PlanVerdict::Matches(0));
     }
 }

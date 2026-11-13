@@ -666,12 +666,16 @@ pub fn dom_facts(
                     None
                 };
                 if let (Some(target), Some(base)) = (target, &base)
+                    && target.len() <= crate::safety::MAX_URL_BYTES
                     && let Ok(mut link) = base.join(target.trim())
                     && matches!(link.scheme(), "http" | "https")
                 {
                     link.set_fragment(None);
                     let link = link.to_string();
-                    if link_seen.insert(link.clone()) {
+                    // A link the browser could not be sent to anyway is not remembered: a page
+                    // could otherwise fill the observed set with huge URLs.
+                    if link.len() <= crate::safety::MAX_URL_BYTES && link_seen.insert(link.clone())
+                    {
                         facts.links.push(link);
                     }
                 }
@@ -877,7 +881,7 @@ impl Conn {
     }
 
     /// Frame targets the browser keeps in another process: id to URL.
-    async fn iframe_targets(&self) -> HashMap<String, String> {
+    pub(super) async fn iframe_targets(&self) -> HashMap<String, String> {
         let mut out = HashMap::new();
         if let Ok(reply) = self.browser_call("Target.getTargets", json!({})).await {
             for info in reply["targetInfos"].as_array().into_iter().flatten() {
@@ -1480,6 +1484,27 @@ mod tests {
         let none = dom_facts(&synthetic(), false, &|_| false).unwrap();
         assert!(none.links.is_empty());
         assert!(!none.hidden.is_empty());
+    }
+
+    #[test]
+    fn links_longer_than_a_url_the_browser_would_accept_are_not_kept() {
+        let long = |extra: usize| {
+            let mut snapshot = synthetic();
+            let slot = snapshot["strings"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|v| *v == "/shop#top")
+                .unwrap();
+            *slot = json!(format!("/{}", "a".repeat(extra)));
+            dom_facts(&snapshot, false, &|_| true).unwrap().links
+        };
+        // "https://shop.test/" is 18 bytes: this one is exactly at the limit.
+        let at_limit = long(crate::safety::MAX_URL_BYTES - 18);
+        assert_eq!(at_limit.len(), 1);
+        assert_eq!(at_limit[0].len(), crate::safety::MAX_URL_BYTES);
+        assert!(long(crate::safety::MAX_URL_BYTES - 17).is_empty());
+        assert!(long(10 * crate::safety::MAX_URL_BYTES).is_empty());
     }
 
     #[test]

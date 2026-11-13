@@ -427,6 +427,12 @@ impl Server {
                 .ctx
                 .approvals
                 .mrtr_request(principal, request, need, now);
+            // The message carries the page URL and an element name, as page-derived as any
+            // other result text: it is redacted and bounded like one.
+            let mut requests = self.ctx.redactor.redacted(&requests);
+            if let Some(Value::String(message)) = requests.pointer_mut("/approval/params/message") {
+                *message = tools::truncated(message, max);
+            }
             return json!({
                 "resultType": "input_required",
                 "inputRequests": requests,
@@ -1024,6 +1030,40 @@ mod tests {
         );
         assert!(!seen[0].body.to_string().contains("sk-synthetic"));
         assert!(!out.to_string().contains("sk-synthetic"));
+    }
+
+    #[tokio::test]
+    async fn the_elicitation_message_is_redacted_and_bounded_like_any_page_derived_text() {
+        let (ctx, _dir) = ctx_from("[mcp]\nmax_result_bytes = 4096\n");
+        let server = Server::new(ctx);
+        let need = approvals::ApprovalNeed {
+            action_digest: "a".repeat(64),
+            tool: "click".into(),
+            class: "destructive".into(),
+            origin: "https://app.example.test".into(),
+            reasons: vec!["profile.destructive".into()],
+            summary: format!(
+                "click on \u{201c}Pin bxt_0123456789abcdef0123456789\u{201d} at https://app.example.test/{}",
+                "p".repeat(20_000)
+            ),
+            plan_digest: None,
+            grant_digest: None,
+        };
+        let error = ToolError::approval_required(need);
+        let meta = RequestMeta {
+            modern: true,
+            elicitation: true,
+            ..RequestMeta::legacy()
+        };
+        let reply = server.approval_response(&error, &meta, "stdio", "request", 1000, 4096);
+        assert_eq!(reply["resultType"], "input_required", "{reply}");
+        assert!(reply["requestState"].is_string());
+        let message = reply["inputRequests"]["approval"]["params"]["message"]
+            .as_str()
+            .unwrap();
+        assert!(!message.contains("bxt_0123"), "{message}");
+        assert!(message.contains("output truncated"), "{message}");
+        assert!(message.len() <= 4096, "{} bytes", message.len());
     }
 
     #[tokio::test]

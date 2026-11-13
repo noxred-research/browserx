@@ -173,7 +173,7 @@ impl Grant {
         Self::from_raw(raw)
     }
 
-    fn from_raw(raw: RawGrant) -> Result<Self, GrantError> {
+    fn from_raw(mut raw: RawGrant) -> Result<Self, GrantError> {
         if raw.budgets.cost_usd.is_some() {
             return Err(invalid(
                 "budgets.cost_usd is not supported yet: remove it (no tool spends model budget under a grant)",
@@ -216,9 +216,6 @@ impl Grant {
                     "plan steps need a tool and 0 < max_count <= 100000",
                 ));
             }
-            if step.origin != "*" {
-                origin_of(&step.origin)?;
-            }
             if step.action_class != "*"
                 && crate::classifier::ActionClass::parse(&step.action_class).is_none()
             {
@@ -228,6 +225,15 @@ impl Grant {
                 )));
             }
         }
+        // A step's origin is compared with the origin of the page, which is always in the
+        // normalized form (`https://app.test`, never `https://App.test:443/`).
+        for step in &mut raw.plan {
+            if step.origin != "*" {
+                step.origin = origin_of(&step.origin)?;
+            }
+        }
+        raw.grant.ro_origins = ro_origins.iter().cloned().collect();
+        raw.grant.rw_origins = rw_origins.iter().cloned().collect();
         let budgets = Budgets {
             calls: raw.budgets.calls,
             time_secs: raw.budgets.time_secs,
@@ -352,6 +358,7 @@ impl Grant {
             }
         }
         if let Some(base) = ceiling.grant {
+            self.violations_against_grant(base, &mut out);
             if !base.allowed_tools.is_empty()
                 && (self.allowed_tools.is_empty()
                     || !self.allowed_tools.is_subset(&base.allowed_tools))
@@ -366,6 +373,72 @@ impl Grant {
             }
         }
         out
+    }
+
+    /// What this grant (or proposal) does not narrow of the active grant `base`: budgets, the
+    /// start of the window and the plan. A plan narrows when every step is covered by a step of
+    /// the active plan (same tool, an origin and action class the base step names or `*`) and,
+    /// summed per base step, asks for no more runs than it allows.
+    fn violations_against_grant(&self, base: &Grant, out: &mut Vec<String>) {
+        for (name, mine, limit) in [
+            ("calls", self.budgets.calls, base.budgets.calls),
+            ("time_secs", self.budgets.time_secs, base.budgets.time_secs),
+        ] {
+            match (mine, limit) {
+                (_, None) => {}
+                (Some(mine), Some(limit)) if mine <= limit => {}
+                (Some(mine), Some(limit)) => out.push(format!(
+                    "budgets.{name} {mine} exceeds the active grant's {limit}"
+                )),
+                (None, Some(limit)) => out.push(format!(
+                    "budgets.{name} must be set: the active grant limits it to {limit}"
+                )),
+            }
+        }
+        if let Some(from) = base.not_before
+            && !self.not_before.is_some_and(|mine| mine >= from)
+        {
+            out.push("not_before must be set and not earlier than the active grant's".into());
+        }
+        if base.plan.is_empty() {
+            return;
+        }
+        if self.plan.is_empty() {
+            out.push(
+                "the plan is missing: the active grant has one, and a proposal must keep to it"
+                    .into(),
+            );
+            return;
+        }
+        let mut asked = vec![0_u64; base.plan.len()];
+        for (number, step) in self.plan.iter().enumerate() {
+            let covering = base.plan.iter().position(|allowed| {
+                allowed.tool == step.tool
+                    && (allowed.origin == "*" || allowed.origin == step.origin)
+                    && (allowed.action_class == "*" || allowed.action_class == step.action_class)
+            });
+            match covering {
+                Some(index) => {
+                    asked[index] = asked[index].saturating_add(u64::from(step.max_count));
+                }
+                None => out.push(format!(
+                    "plan step {} ({} on {} as {}) is not a step of the active plan",
+                    number + 1,
+                    step.tool,
+                    step.origin,
+                    step.action_class
+                )),
+            }
+        }
+        for (index, total) in asked.iter().enumerate() {
+            let allowed = u64::from(base.plan[index].max_count);
+            if *total > allowed {
+                out.push(format!(
+                    "the plan asks for {total} runs of step {} of the active plan, which allows {allowed}",
+                    index + 1
+                ));
+            }
+        }
     }
 }
 
@@ -631,14 +704,25 @@ fn entropy_bits_per_char(text: &str) -> f64 {
         .sum()
 }
 
-/// Whether a URL carries a secret-looking value in a query value, a path segment or a fragment.
+/// Whether `text`, or any piece of it between the separators that hold `key=value` lists
+/// (`=`, `&`, `;`, `,`), once percent-decoded, looks like a credential.
+fn text_carries_secret(text: &str) -> bool {
+    let decoded = crate::manifest::percent_decode(text);
+    looks_secret(&decoded)
+        || looks_secret(text)
+        || decoded.split(['=', '&', ';', ',']).any(looks_secret)
+}
+
+/// Whether a URL carries a secret-looking value in a query key or value, a path segment or the
+/// fragment, as written or percent-decoded (`sk%2D...`).
 #[must_use]
 pub fn url_carries_secret(url: &url::Url) -> bool {
-    url.query_pairs().any(|(_, value)| looks_secret(&value))
+    url.query_pairs()
+        .any(|(key, value)| looks_secret(&key) || looks_secret(&value))
         || url
             .path_segments()
-            .is_some_and(|mut segments| segments.any(looks_secret))
-        || url.fragment().is_some_and(looks_secret)
+            .is_some_and(|mut segments| segments.any(text_carries_secret))
+        || url.fragment().is_some_and(text_carries_secret)
 }
 
 /// Progress through a plan, per handle: steps run in order, earlier steps close when a later
@@ -822,6 +906,129 @@ max_count = 1
     }
 
     #[test]
+    fn proposals_cannot_loosen_budgets_the_window_or_the_plan() {
+        let base = Grant::parse(SAMPLE).unwrap();
+        let ceiling = Ceiling {
+            engagement: Some("eng-1"),
+            grant: Some(&base),
+            ..Ceiling::default()
+        };
+        let violations = |text: &str| Grant::parse(text).unwrap().violations_against(&ceiling);
+        assert_eq!(violations(SAMPLE), Vec::<String>::new());
+
+        for (what, text) in [
+            ("more calls", SAMPLE.replace("calls = 50", "calls = 51")),
+            ("no calls budget", SAMPLE.replace("calls = 50\n", "")),
+            (
+                "more time",
+                SAMPLE.replace("time_secs = 600", "time_secs = 601"),
+            ),
+            ("no time budget", SAMPLE.replace("time_secs = 600\n", "")),
+            (
+                "no plan",
+                SAMPLE.split("[[plan]]").next().unwrap().to_owned(),
+            ),
+            (
+                "a step that is not in the plan",
+                SAMPLE.replace("tool = \"click\"", "tool = \"evaluate_js\""),
+            ),
+            (
+                "a step on another origin",
+                SAMPLE.replace(
+                    "origin = \"https://app.example.test\"",
+                    "origin = \"https://cdn.example.test\"",
+                ),
+            ),
+            (
+                "a step on any origin where the plan names one",
+                SAMPLE.replace("origin = \"https://app.example.test\"", "origin = \"*\""),
+            ),
+            (
+                "a step of another class",
+                SAMPLE.replace(
+                    "action_class = \"navigate_in_scope\"\nmax_count = 2",
+                    "action_class = \"destructive\"\nmax_count = 2",
+                ),
+            ),
+            (
+                "a step that runs more often",
+                SAMPLE.replace("max_count = 5", "max_count = 6"),
+            ),
+            (
+                "two steps that share one step of the plan",
+                format!(
+                    "{SAMPLE}\n[[plan]]\ntool = \"open_page\"\norigin = \"https://app.example.test\"\naction_class = \"navigate_in_scope\"\nmax_count = 1\n"
+                ),
+            ),
+        ] {
+            assert!(!violations(&text).is_empty(), "{what} must not narrow");
+        }
+
+        // Fewer calls, fewer steps and a smaller count do narrow.
+        let narrower = SAMPLE
+            .replace("calls = 50", "calls = 10")
+            .replace("max_count = 5", "max_count = 2");
+        let narrower = narrower.split("[[plan]]\ntool = \"click\"").next().unwrap();
+        assert_eq!(violations(narrower), Vec::<String>::new());
+
+        // The start of the window cannot move earlier either.
+        let started = Grant::parse(&SAMPLE.replace(
+            "not_after =",
+            "not_before = \"2030-01-01T00:00:00Z\"\nnot_after =",
+        ))
+        .unwrap();
+        let ceiling = Ceiling {
+            grant: Some(&started),
+            ..Ceiling::default()
+        };
+        assert!(!base.violations_against(&ceiling).is_empty());
+        let earlier = Grant::parse(&SAMPLE.replace(
+            "not_after =",
+            "not_before = \"2029-01-01T00:00:00Z\"\nnot_after =",
+        ))
+        .unwrap();
+        assert!(!earlier.violations_against(&ceiling).is_empty());
+        let later = Grant::parse(&SAMPLE.replace(
+            "not_after =",
+            "not_before = \"2031-01-01T00:00:00Z\"\nnot_after =",
+        ))
+        .unwrap();
+        assert!(later.violations_against(&ceiling).is_empty());
+    }
+
+    #[test]
+    fn plan_origins_are_stored_in_the_form_pages_report() {
+        let grant = Grant::parse(&SAMPLE.replace(
+            "origin = \"https://app.example.test\"",
+            "origin = \"https://App.Example.test:443/\"",
+        ))
+        .unwrap();
+        assert_eq!(grant.plan[0].origin, "https://app.example.test");
+        assert_eq!(
+            PlanProgress::default().check(
+                &grant.plan,
+                "open_page",
+                "https://app.example.test",
+                "navigate_in_scope"
+            ),
+            PlanVerdict::Matches(0)
+        );
+        assert!(
+            grant
+                .to_toml()
+                .unwrap()
+                .contains("origin = \"https://app.example.test\"")
+        );
+        assert!(
+            Grant::parse(&SAMPLE.replace(
+                "origin = \"https://app.example.test\"",
+                "origin = \"nonsense\""
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn manifest_ceiling_bounds_origins_and_modes() {
         let manifest = Manifest::parse(
             r#"
@@ -934,6 +1141,37 @@ max_calls = 100
         assert!(!url_carries_secret(
             &url::Url::parse("https://a.test/search?q=boots").unwrap()
         ));
+    }
+
+    #[test]
+    fn secrets_are_found_in_query_keys_and_in_encoded_paths_and_fragments() {
+        for leaky in [
+            "https://evil.test/?sk-0123456789abcdefghij",
+            "https://evil.test/?sk-0123456789abcdefghij=1",
+            "https://evil.test/?bxk_test_0123456789abcdef=",
+            "https://evil.test/sk%2D0123456789abcdefghij",
+            "https://evil.test/a/%62xk_test_0123456789abcdef/b",
+            "https://evil.test/#sk%2D0123456789abcdefghij",
+            "https://evil.test/#access_token=Zk3Hq9XpL2vB7nTr5WcYd8Ae",
+            "https://evil.test/a;key=bxk_test_0123456789abcdef",
+            "https://evil.test/?q=sk%2D0123456789abcdefghij",
+        ] {
+            assert!(
+                url_carries_secret(&url::Url::parse(leaky).unwrap()),
+                "{leaky}"
+            );
+        }
+        for harmless in [
+            "https://a.test/search?q=boots&page=2#top",
+            "https://a.test/a-fairly-long-readable-slug/",
+            "https://a.test/?utm_source=newsletter&utm_medium=email",
+            "https://a.test/docs#installing-on-linux",
+        ] {
+            assert!(
+                !url_carries_secret(&url::Url::parse(harmless).unwrap()),
+                "{harmless}"
+            );
+        }
     }
 
     #[test]

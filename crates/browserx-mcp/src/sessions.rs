@@ -16,6 +16,10 @@ pub struct Managed {
     pub token: Secret,
     /// Configured with `[[adopt]]` rather than created by this server.
     pub adopted: bool,
+    /// Why using the session is a sensitive context (flag B of the Rule of Two): it keeps
+    /// browser state or goes through an upstream route. Every use marks B again, whichever
+    /// handle or principal makes it.
+    pub sensitive: Option<String>,
 }
 
 impl std::fmt::Debug for Managed {
@@ -23,6 +27,7 @@ impl std::fmt::Debug for Managed {
         f.debug_struct("Managed")
             .field("id", &self.id)
             .field("adopted", &self.adopted)
+            .field("sensitive", &self.sensitive)
             .finish_non_exhaustive()
     }
 }

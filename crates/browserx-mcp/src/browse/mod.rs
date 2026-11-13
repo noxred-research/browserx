@@ -190,6 +190,23 @@ impl Hub {
         }
     }
 
+    /// Forgets every element reference and stored snapshot of every open page, so a retired
+    /// context cannot act on what it saw: its refs stop resolving until a new snapshot.
+    pub async fn forget_refs(&self) {
+        let slots: Vec<Slot> = self
+            .slots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        for slot in slots {
+            if let Some(conn) = slot.lock().await.as_ref() {
+                conn.forget_refs();
+            }
+        }
+    }
+
     /// Closes every connection.
     pub async fn close_all(&self) {
         let ids: Vec<String> = self

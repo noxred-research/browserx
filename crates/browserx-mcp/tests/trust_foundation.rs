@@ -152,7 +152,9 @@ async fn the_signed_manifest_confines_hosts_and_protects_requests() {
             "/",
             page(
                 "<main><h1>App</h1><a href=\"/account/delete?id=1\">Remove me</a>\
-                 <form method=\"post\" action=\"/logout\"><button type=\"submit\">Sign out</button></form></main>",
+                 <form method=\"post\" action=\"/logout\"><button type=\"submit\">Sign out</button></form>\
+                 <form id=\"hidden\" method=\"post\" action=\"/logout\"></form>\
+                 <button type=\"button\" onclick=\"document.getElementById('hidden').submit()\">Quick exit</button></main>",
             ),
         ),
         ("/logout", String::new()),
@@ -232,6 +234,21 @@ async fn the_signed_manifest_confines_hosts_and_protects_requests() {
         "{refused}"
     );
     assert_eq!(attack.count("POST"), 0);
+
+    // A script that submits a protected POST by itself is held at the network: the click is
+    // not a form submit as far as the page's markup shows, but the request it sends is.
+    lab.open(&format!("{}/", attack.base)).await;
+    let snapshot = lab.snapshot().await;
+    let quick = ref_of(&snapshot, "button \"Quick exit\"");
+    let scripted = lab
+        .mcp
+        .tool("click", json!({"session_id": lab.id, "ref": quick}))
+        .await;
+    assert_eq!(
+        attack.count("POST"),
+        0,
+        "the scripted POST reached the site: {scripted}"
+    );
 
     // The engagement id and the manifest digest are in every audit entry.
     let audit = lab.audit();
@@ -527,6 +544,17 @@ async fn approvals_run_an_action_exactly_once_over_both_routes() {
     let again = lab.mcp.tool("type_text", with_id).await;
     assert_eq!(again["isError"], true);
     assert_eq!(ok_results(&lab), before + 1, "the approval is single use");
+    // A used approval is no longer listed as pending, cannot be approved again and does not
+    // run the action a second time even when it is.
+    let later = time::OffsetDateTime::now_utc().unix_timestamp();
+    assert!(
+        approvals::list_pending(&dir, later)
+            .unwrap()
+            .iter()
+            .all(|p| p.id != id),
+        "a used approval is listed as pending"
+    );
+    assert!(approvals::approve(&dir, &id, &lab.keys, "op", later).is_err());
 
     // The destructive click: no POST until approved; then exactly one.
     let click_args = json!({"session_id": lab.id, "ref": delete});
@@ -644,7 +672,39 @@ async fn the_ledger_turns_three_flags_into_an_approval_or_a_refusal() {
         .await;
         assert_eq!(reason(&other).as_deref(), Some("unknown_handle"), "{other}");
         assert!(other.to_string().contains("unknown handle"));
-        let reset = lab.mcp.ok("reset_context", json!({})).await;
+        // A reset clears the flags, so a model that could reset on its own could drop the
+        // untrusted input it holds and then run the call that was just refused: it needs a human
+        // approval under enforce and is refused under strict.
+        let asked = lab.mcp.tool("reset_context", json!({})).await;
+        assert_eq!(asked["isError"], true, "{asked}");
+        let still = lab.mcp.ok("engagement_status", json!({})).await;
+        assert_eq!(still["flags"], json!({"A": true, "B": true, "C": true}));
+        assert_eq!(still["handle"], json!(handle), "nothing was reset");
+        if strict {
+            assert_eq!(reason(&asked).as_deref(), Some("reset_refused"), "{asked}");
+            let again = lab
+                .mcp
+                .tool("click", json!({"session_id": lab.id, "ref": run}))
+                .await;
+            assert_eq!(reason(&again).as_deref(), Some("rule_of_two"), "{again}");
+            lab.stop().await;
+            continue;
+        }
+        assert_eq!(
+            kind(&asked).as_deref(),
+            Some("approval_required"),
+            "{asked}"
+        );
+        let id = asked["structuredContent"]["error"]["detail"]["approval_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        approvals::approve(&lab.mcp.ctx.cfg.approvals_dir(), &id, &lab.keys, "op", now).unwrap();
+        let reset = lab
+            .mcp
+            .ok("reset_context", json!({"approval_id": id}))
+            .await;
         assert_eq!(reset["retired"], true);
         let old = lab
             .mcp
@@ -654,6 +714,23 @@ async fn the_ledger_turns_three_flags_into_an_approval_or_a_refusal() {
         let fresh = lab.mcp.ok("engagement_status", json!({})).await;
         assert_eq!(fresh["flags"], json!({"A": false, "B": false, "C": true}));
         assert_ne!(fresh["handle"], json!(handle));
+        // The refs of the retired context stop resolving: the new one reads the page first.
+        let stale = lab
+            .mcp
+            .tool("click", json!({"session_id": lab.id, "ref": run}))
+            .await;
+        assert_eq!(stale["isError"], true, "{stale}");
+        assert_eq!(
+            stale["structuredContent"]["error"]["detail"]["stale_ref"], true,
+            "{stale}"
+        );
+        let snapshot = lab.snapshot().await;
+        let run = ref_of(&snapshot, "button \"Run\"");
+        let clicked = lab
+            .mcp
+            .tool("click", json!({"session_id": lab.id, "ref": run}))
+            .await;
+        assert_eq!(clicked["isError"], false, "{clicked}");
 
         // A restarted server does not know any old handle.
         let again = plain_ctx(
@@ -798,11 +875,46 @@ async fn a_signed_grant_limits_reading_actions_and_the_steps_that_may_run() {
         Some("proposal_widens_ceiling"),
         "{widening}"
     );
+    // Dropping the plan, raising the budget or adding a step the plan does not have widens it.
+    for (what, proposal) in [
+        (
+            "no plan",
+            json!({"ro_origins": [doc.base], "rw_origins": [], "calls": 5, "not_after": "2098-01-01T00:00:00Z"}),
+        ),
+        (
+            "more calls",
+            json!({"ro_origins": [doc.base], "rw_origins": [], "calls": 101, "not_after": "2098-01-01T00:00:00Z",
+                   "plan": [{"tool": "page_snapshot", "max_count": 1}]}),
+        ),
+        (
+            "no calls budget",
+            json!({"ro_origins": [doc.base], "rw_origins": [], "not_after": "2098-01-01T00:00:00Z",
+                   "plan": [{"tool": "page_snapshot", "max_count": 1}]}),
+        ),
+        (
+            "a step that is not in the plan",
+            json!({"ro_origins": [doc.base], "rw_origins": [], "calls": 5, "not_after": "2098-01-01T00:00:00Z",
+                   "plan": [{"tool": "evaluate_js", "max_count": 1}]}),
+        ),
+        (
+            "a step that runs more often",
+            json!({"ro_origins": [doc.base], "rw_origins": [], "calls": 5, "not_after": "2098-01-01T00:00:00Z",
+                   "plan": [{"tool": "page_snapshot", "max_count": 6}]}),
+        ),
+    ] {
+        let refused = lab.mcp.tool("propose_scope_grant", proposal).await;
+        assert_eq!(
+            reason(&refused).as_deref(),
+            Some("proposal_widens_ceiling"),
+            "{what}: {refused}"
+        );
+    }
     let narrowing = lab
         .mcp
         .ok(
             "propose_scope_grant",
             json!({"ro_origins": [doc.base], "rw_origins": [], "allowed_tools": ["open_page"], "calls": 5,
+                   "plan": [{"tool": "open_page", "origin": app.base, "action_class": "navigate_in_scope", "max_count": 1}],
                    "not_after": "2098-01-01T00:00:00Z"}),
         )
         .await;
@@ -905,4 +1017,350 @@ async fn screenshots_are_resource_links_for_modern_requests_and_images_for_legac
         .unwrap();
     assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']);
     lab.stop().await;
+}
+
+/// A grant file and its signature, written into the lab's directory.
+fn write_grant(dir: &Path, keys: &OperatorKeys, text: &str) {
+    std::fs::write(dir.join("grant.toml"), text).unwrap();
+    std::fs::write(
+        dir.join("grant.toml.sig"),
+        grants::sign(keys, "op", text.as_bytes()).unwrap(),
+    )
+    .unwrap();
+}
+
+fn grant_config(origins: &[&str], extra: &str) -> String {
+    let list = origins
+        .iter()
+        .map(|o| format!("\"{o}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "[operator]\nkeys_file = \"operator.keys\"\n[grant]\npath = \"grant.toml\"\n\
+         [mcp]\ncapabilities = [\"sessions\", \"browse\", \"interact\", \"evaluate\"]\n\
+         [browse]\nallowed_origins = [{list}]\n\
+         [engagement]\nid = \"E\"\noperator = \"alice\"\nauthorization_note = \"n\"\n\
+         [safety]\nprofile = \"authorized_security_test\"\n{extra}"
+    )
+}
+
+#[tokio::test]
+async fn a_reset_does_not_refill_the_budget_or_rewind_the_plan() {
+    let scratch = tempfile::tempdir().unwrap();
+    let app = serve(vec![("/", page("<main><h1>App</h1></main>"))]).await;
+    // The plan names its origin with a trailing slash: it is stored in the form pages report.
+    let grant_text = format!(
+        "[grant]\nengagement = \"E\"\nprincipal = \"*\"\nrw_origins = [\"{app}\"]\n\
+         not_after = \"2099-01-01T00:00:00Z\"\n[budgets]\ncalls = 14\n\
+         [[plan]]\ntool = \"open_page\"\norigin = \"{app}/\"\naction_class = \"navigate_in_scope\"\nmax_count = 2\n\
+         [[plan]]\ntool = \"page_text\"\nmax_count = 1000\n",
+        app = app.base
+    );
+    let origin = app.base.clone();
+    let Some(mut lab) = lab(scratch.path(), |dir, keys| {
+        write_grant(dir, keys, &grant_text);
+        grant_config(&[origin.as_str()], "[safety.rule_of_two]\nmode = \"off\"\n")
+    })
+    .await
+    else {
+        return;
+    };
+    // Two runs of the first step, then it is used up: a plan limits how often a step runs.
+    for _ in 0..2 {
+        let opened = lab.open(&format!("{}/", app.base)).await;
+        assert_eq!(opened["isError"], false, "{opened}");
+    }
+    let third = lab.open(&format!("{}/", app.base)).await;
+    assert_eq!(reason(&third).as_deref(), Some("outside_plan"), "{third}");
+    // Resetting the context does not give the step its runs back.
+    let reset = lab.mcp.ok("reset_context", json!({})).await;
+    assert_eq!(reset["retired"], true);
+    let again = lab.open(&format!("{}/", app.base)).await;
+    assert_eq!(reason(&again).as_deref(), Some("outside_plan"), "{again}");
+
+    // The call budget is the principal's: it runs out, and a reset does not refill it.
+    let mut used = 0;
+    loop {
+        let text = lab
+            .mcp
+            .tool("page_text", json!({"session_id": lab.id}))
+            .await;
+        if text["isError"] == true {
+            assert_eq!(reason(&text).as_deref(), Some("budget_exhausted"), "{text}");
+            break;
+        }
+        used += 1;
+        assert!(used < 40, "the budget of 14 calls never ran out");
+    }
+    lab.mcp.ok("reset_context", json!({})).await;
+    let after = lab
+        .mcp
+        .tool("page_text", json!({"session_id": lab.id}))
+        .await;
+    assert_eq!(
+        reason(&after).as_deref(),
+        Some("budget_exhausted"),
+        "a reset refilled the budget: {after}"
+    );
+    let status = lab.mcp.ok("engagement_status", json!({})).await;
+    assert!(status["calls"].as_u64().unwrap() > 14, "{status}");
+    lab.stop().await;
+}
+
+#[tokio::test]
+async fn a_read_only_origin_can_be_read_but_not_acted_on() {
+    let scratch = tempfile::tempdir().unwrap();
+    let docs = serve(vec![(
+        "/",
+        page(
+            "<main><h1>Reference</h1><input type=\"text\" aria-label=\"Note\">\
+             <select aria-label=\"Pick\"><option>one</option><option>two</option></select>\
+             <button type=\"button\">Run</button></main>",
+        ),
+    )])
+    .await;
+    let app = serve(vec![(
+        "/",
+        page(&format!(
+            "<main><h1>App</h1><a href=\"{docs}/\">Reference</a>\
+             <input type=\"text\" aria-label=\"Query\"></main>",
+            docs = docs.base
+        )),
+    )])
+    .await;
+    let grant_text = format!(
+        "[grant]\nengagement = \"E\"\nprincipal = \"*\"\nro_origins = [\"{docs}\"]\nrw_origins = [\"{app}\"]\n\
+         not_after = \"2099-01-01T00:00:00Z\"\n",
+        docs = docs.base,
+        app = app.base
+    );
+    let origins = [app.base.as_str(), docs.base.as_str()];
+    let Some(mut lab) = lab(scratch.path(), |dir, keys| {
+        write_grant(dir, keys, &grant_text);
+        grant_config(&origins, "[safety.rule_of_two]\nmode = \"off\"\n")
+    })
+    .await
+    else {
+        return;
+    };
+    // On the read-write origin the actions run.
+    lab.open(&format!("{}/", app.base)).await;
+    let snapshot = lab.snapshot().await;
+    let query = ref_of(&snapshot, "textbox \"Query\"");
+    let typed = lab
+        .mcp
+        .tool(
+            "type_text",
+            json!({"session_id": lab.id, "ref": query, "text": "boots"}),
+        )
+        .await;
+    assert_eq!(typed["isError"], false, "{typed}");
+
+    // The link was seen on a readable page, so the read-only origin can be opened and read.
+    let opened = lab.open(&format!("{}/", docs.base)).await;
+    assert_eq!(opened["isError"], false, "{opened}");
+    let snapshot = lab.snapshot().await;
+    let note = ref_of(&snapshot, "textbox \"Note\"");
+    let pick = ref_of(&snapshot, "combobox \"Pick\"");
+    let run = ref_of(&snapshot, "button \"Run\"");
+    let text = lab
+        .mcp
+        .tool("page_text", json!({"session_id": lab.id}))
+        .await;
+    assert_eq!(text["isError"], false, "{text}");
+
+    // Nothing acts on it: not typing, choosing, keys, clicks of any class, nor script.
+    let session = lab.id.clone();
+    for (tool, arguments) in [
+        (
+            "type_text",
+            json!({"session_id": session, "ref": note, "text": "hello"}),
+        ),
+        (
+            "select_option",
+            json!({"session_id": session, "ref": pick, "label": "two"}),
+        ),
+        ("press_key", json!({"session_id": session, "key": "a"})),
+        ("click", json!({"session_id": session, "ref": run})),
+        (
+            "evaluate_js",
+            json!({"session_id": session, "expression": "document.title"}),
+        ),
+    ] {
+        let refused = lab.mcp.tool(tool, arguments).await;
+        assert_eq!(
+            reason(&refused).as_deref(),
+            Some("origin_not_in_rw"),
+            "{tool}: {refused}"
+        );
+    }
+    let audit = lab.audit();
+    assert!(audit.contains("\"reason\":\"origin_not_in_rw\""));
+    lab.stop().await;
+}
+
+#[tokio::test]
+async fn the_sensitivity_of_a_session_outlives_a_reset_and_follows_every_principal() {
+    let scratch = tempfile::tempdir().unwrap();
+    let site = serve(vec![("/", page("<main><h1>Home</h1></main>"))]).await;
+    let origin = site.base.clone();
+    let Some(mut lab) = lab(scratch.path(), |_, _| {
+        format!(
+            "[operator]\nkeys_file = \"operator.keys\"\n[mcp]\ncapabilities = [\"sessions\", \"browse\", \"interact\"]\n\
+             [browse]\nallowed_origins = [\"{origin}\"]\n\
+             [engagement]\nid = \"E\"\noperator = \"alice\"\nauthorization_note = \"n\"\n\
+             [safety]\nprofile = \"authorized_security_test\"\n\
+             [safety.rule_of_two]\nmode = \"warn\"\nprivate_network_is_sensitive = false\n"
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let server = Server::new(Arc::clone(&lab.mcp.ctx));
+    let persistent = lab
+        .mcp
+        .tool(
+            "create_session",
+            json!({"launch_profile": "default", "persistence": "snapshot"}),
+        )
+        .await;
+    assert_eq!(persistent["isError"], false, "{persistent}");
+    let persistent = persistent["structuredContent"]["session"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let status = lab.mcp.ok("engagement_status", json!({})).await;
+    assert_eq!(status["flags"]["B"], true);
+
+    // After a reset B is clear, and it comes back as soon as the session is used.
+    lab.mcp.ok("reset_context", json!({})).await;
+    let status = lab.mcp.ok("engagement_status", json!({})).await;
+    assert_eq!(status["flags"]["B"], false, "{status}");
+    let opened = lab
+        .mcp
+        .tool(
+            "open_page",
+            json!({"session_id": persistent, "url": format!("{}/", site.base)}),
+        )
+        .await;
+    assert_eq!(opened["isError"], false, "{opened}");
+    let status = lab.mcp.ok("engagement_status", json!({})).await;
+    assert_eq!(status["flags"]["B"], true, "{status}");
+    assert!(
+        status["why"]["B"].to_string().contains("persistent"),
+        "{status}"
+    );
+
+    // Another principal using the same session is in a sensitive context too.
+    let other = |name: &'static str, arguments: Value| {
+        rpc_as(
+            &server,
+            Some("http:other"),
+            "tools/call",
+            json!({"name": name, "arguments": arguments}),
+        )
+    };
+    let status = other("engagement_status", json!({})).await;
+    assert_eq!(status["structuredContent"]["flags"]["B"], false, "{status}");
+    let opened = other(
+        "open_page",
+        json!({"session_id": persistent, "url": format!("{}/", site.base)}),
+    )
+    .await;
+    assert_eq!(opened["isError"], false, "{opened}");
+    let status = other("engagement_status", json!({})).await;
+    assert_eq!(status["structuredContent"]["flags"]["B"], true, "{status}");
+    lab.stop().await;
+}
+
+#[tokio::test]
+async fn a_screenshot_counts_as_untrusted_input() {
+    let scratch = tempfile::tempdir().unwrap();
+    let site = serve(vec![("/", page("<main><h1>Shot</h1></main>"))]).await;
+    let origin = site.base.clone();
+    let Some(mut lab) = lab(scratch.path(), |_, _| {
+        format!(
+            "[operator]\nkeys_file = \"operator.keys\"\n[mcp]\ncapabilities = [\"sessions\", \"browse\"]\n\
+             [browse]\nallowed_origins = [\"{origin}\"]\n\
+             [engagement]\nid = \"E\"\noperator = \"alice\"\nauthorization_note = \"n\"\n\
+             [safety.rule_of_two]\nmode = \"off\"\n"
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    lab.open(&format!("{}/", site.base)).await;
+    // Start again with the page still open: nothing was read in the new context.
+    lab.mcp.ok("reset_context", json!({})).await;
+    let status = lab.mcp.ok("engagement_status", json!({})).await;
+    assert_eq!(status["flags"]["A"], false, "{status}");
+    let shot = lab
+        .mcp
+        .tool("screenshot", json!({"session_id": lab.id}))
+        .await;
+    assert_eq!(shot["isError"], false, "{shot}");
+    let status = lab.mcp.ok("engagement_status", json!({})).await;
+    assert_eq!(status["flags"]["A"], true, "{status}");
+    lab.stop().await;
+}
+
+#[tokio::test]
+async fn a_screenshot_is_refused_while_a_frame_in_another_process_is_on_the_page() {
+    let scratch = tempfile::tempdir().unwrap();
+    let framed = serve(vec![(
+        "/frame",
+        page("<main><h2>CROSS-PROCESS-SECRET</h2></main>"),
+    )])
+    .await;
+    // `localhost` and `127.0.0.1` are different sites: the browser keeps the frame in its own
+    // process, so the page's frame tree does not list it.
+    let framed_origin = format!("http://localhost:{}", framed.port);
+    let app = serve(vec![(
+        "/",
+        page(&format!(
+            "<main><h1>App</h1><iframe src=\"{framed_origin}/frame\" title=\"Embedded\"></iframe></main>"
+        )),
+    )])
+    .await;
+    for readable in [false, true] {
+        let ro = if readable {
+            format!("\"{framed_origin}\"")
+        } else {
+            String::new()
+        };
+        let grant_text = format!(
+            "[grant]\nengagement = \"E\"\nprincipal = \"*\"\nro_origins = [{ro}]\nrw_origins = [\"{app}\"]\n\
+             not_after = \"2099-01-01T00:00:00Z\"\n",
+            app = app.base
+        );
+        let origins = [app.base.as_str(), framed_origin.as_str()];
+        let Some(mut lab) = lab(scratch.path(), |dir, keys| {
+            write_grant(dir, keys, &grant_text);
+            grant_config(&origins, "[safety.rule_of_two]\nmode = \"off\"\n")
+        })
+        .await
+        else {
+            return;
+        };
+        let opened = lab.open(&format!("{}/", app.base)).await;
+        assert_eq!(opened["isError"], false, "{opened}");
+        let shot = lab
+            .mcp
+            .tool("screenshot", json!({"session_id": lab.id}))
+            .await;
+        if readable {
+            assert_eq!(shot["isError"], false, "a readable frame is shown: {shot}");
+        } else {
+            assert_eq!(
+                reason(&shot).as_deref(),
+                Some("frame_not_in_ro"),
+                "the frame is not in the read scope: {shot}"
+            );
+            let text = common::all_text(&shot);
+            assert!(!text.contains("CROSS-PROCESS-SECRET"), "{text}");
+        }
+        lab.stop().await;
+    }
 }

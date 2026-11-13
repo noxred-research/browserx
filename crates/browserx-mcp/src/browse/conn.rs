@@ -194,7 +194,8 @@ impl Shared {
                 .as_deref()
                 .is_none_or(|main| p["frameId"].as_str() == Some(main));
         let refusal = if main_document {
-            self.scope.navigation_refusal(url)
+            let method = p["request"]["method"].as_str().unwrap_or("GET");
+            self.scope.navigation_refusal_as(method, url)
         } else {
             None
         };
@@ -519,6 +520,14 @@ impl Conn {
         self.client.is_closed()
     }
 
+    /// Forgets every element reference and stored snapshot of every tab.
+    pub(super) fn forget_refs(&self) {
+        for tab in &mut self.shared.state().tabs {
+            tab.refs.clear();
+            tab.snaps.clear();
+        }
+    }
+
     /// Closes the connection.
     pub async fn close(&self) {
         self.client.close().await;
@@ -763,19 +772,29 @@ impl Conn {
         expression: &str,
         timeout_ms: u64,
     ) -> ToolResult<Value> {
-        let result = self
-            .call(
-                tab,
-                "Runtime.evaluate",
-                json!({
-                    "expression": expression,
-                    "returnByValue": true,
-                    "awaitPromise": true,
-                    "timeout": timeout_ms,
-                    "userGesture": false,
-                }),
-            )
-            .await?;
+        self.eval_in(tab, expression, timeout_ms, None).await
+    }
+
+    /// Evaluates a fixed expression in the execution context `context` (the page's main world
+    /// when `None`) and returns its value.
+    pub(super) async fn eval_in(
+        &self,
+        tab: &TabRef,
+        expression: &str,
+        timeout_ms: u64,
+        context: Option<i64>,
+    ) -> ToolResult<Value> {
+        let mut params = json!({
+            "expression": expression,
+            "returnByValue": true,
+            "awaitPromise": true,
+            "timeout": timeout_ms,
+            "userGesture": false,
+        });
+        if let Some(context) = context {
+            params["contextId"] = json!(context);
+        }
+        let result = self.call(tab, "Runtime.evaluate", params).await?;
         if let Some(details) = result.get("exceptionDetails") {
             let text = details["exception"]["description"]
                 .as_str()
@@ -1077,6 +1096,56 @@ mod tests {
             json!({"frameId": "F"}),
         ));
         assert!(!shared.state().tab(1).unwrap().loading);
+    }
+
+    #[test]
+    fn a_protected_post_is_held_back_whatever_started_it() {
+        let manifest = crate::manifest::Manifest::parse(
+            "[engagement]\nid = \"e\"\noperator = \"o\"\nauthorization_note = \"n\"\n\
+             [[scope]]\nhost = \"site.test\"\nmode = \"attack\"\n\
+             [[protected]]\npattern = \"POST /delete\"\nmode = \"blocked\"\n",
+        )
+        .unwrap();
+        let scope = Scope::new(
+            vec!["http://site.test".into()],
+            true,
+            crate::config::Window::default(),
+        )
+        .with_manifest(Arc::new(crate::manifest::Loaded {
+            manifest,
+            digest: "d".into(),
+            signature: crate::manifest::Signature::Valid("op".into()),
+        }));
+        let shared = Shared::new(Limits::default(), Arc::new(scope));
+        shared.state().tabs.push(Tab {
+            num: 1,
+            target_id: "T".into(),
+            session_id: Some("S".into()),
+            main_frame: Some("F".into()),
+            ..Tab::default()
+        });
+        let paused = |method: &str, url: &str| {
+            shared
+                .on_paused(&event(
+                    "Fetch.requestPaused",
+                    Some("S"),
+                    json!({"requestId": "r", "resourceType": "Document", "frameId": "F",
+                           "request": {"url": url, "method": method}}),
+                ))
+                .unwrap()
+        };
+        // A script-submitted form: the document request is a POST.
+        let post = paused("POST", "http://site.test/delete");
+        assert!(!post.allow, "the POST is protected");
+        assert_eq!(post.command().0, "Fetch.failRequest");
+        assert_eq!(
+            shared.state().tab(1).unwrap().blocked.as_ref().map(|b| b.1),
+            Some("blocked_protected")
+        );
+        assert!(!paused("POST", "http://site.test/Delete/?x=1").allow);
+        // The same URL fetched with GET, and another POST, are not covered by the pattern.
+        assert!(paused("GET", "http://site.test/delete").allow);
+        assert!(paused("POST", "http://site.test/save").allow);
     }
 
     #[test]
