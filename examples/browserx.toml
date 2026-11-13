@@ -1,0 +1,99 @@
+# BrowserX example configuration.
+#
+# Check it with:   browserx config check examples/browserx.toml
+# Run it with:     browserx serve --config examples/browserx.toml
+#
+# Unknown keys are errors, so typos never silently fall back to defaults.
+# Every value shown is the default unless marked REQUIRED.
+
+[server]
+# API + authenticated CDP relay. Plaintext HTTP/WebSocket: keep it on loopback
+# or a trusted network, and terminate TLS in a reverse proxy for remote use.
+listen = "127.0.0.1:7690"
+# Operations listener: /healthz, /readyz, /metrics. Keep it off the public network.
+ops_listen = "127.0.0.1:7691"
+# The URL clients use to reach `listen`. The `cdp_url` handed to clients is
+# derived from it (http -> ws, https -> wss). Set it to the https:// URL of your
+# TLS-terminating proxy when you have one.
+public_base_url = "http://127.0.0.1:7690"
+
+# REQUIRED: at least one API key. Create one with `browserx keys new <name>`,
+# which prints the key once and the sha256 line to paste here. Only the digest
+# is stored. Sessions belong to the key that created them and are invisible to
+# other keys.
+[[auth.api_keys]]
+name = "dev"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000" # replace
+max_sessions = 16 # concurrent non-terminal sessions for this key
+
+[pool]
+max_browsers = 8                 # browser processes, dedicated and shared together
+max_contexts_per_browser = 8     # isolated contexts per shared browser
+warm_shared_browsers = 0         # idle shared browsers kept ready
+queue_capacity = 64              # admissions allowed to wait for capacity
+queue_timeout_secs = 30          # then the request fails with 429
+browser_max_age_secs = 3600      # shared browsers stop taking new contexts after this
+browser_max_contexts_served = 1000
+
+[session]
+default_ttl_secs = 600           # lease length; renew to extend
+max_ttl_secs = 3600              # upper bound for requests and renewals
+max_lifetime_secs = 86400        # absolute cap, regardless of renewals
+default_idle_timeout_secs = 300  # release after this long without a controller
+snapshot_interval_secs = 60      # periodic snapshots for persistence=snapshot
+snapshot_keep = 5                # versions kept per profile
+terminal_retention_secs = 86400  # how long closed/lost sessions stay queryable
+
+[storage]
+# db = <state_dir>/browserx.db, snapshots = <state_dir>/snapshots,
+# profiles = <state_dir>/profiles, temp = <state_dir>/tmp
+state_dir = "./.browserx"
+# Snapshot encryption key (AES-256-GCM). Create it with
+# `browserx snapshot-key new ./.browserx/snapshot.key` and back it up:
+# snapshots cannot be opened without it.
+snapshot_key_file = "./.browserx/snapshot.key"
+# Key rotation: generate a new key file, point `snapshot_key_file` at it, and
+# list the previous key file(s) here. The active key seals new snapshots;
+# retired keys can only open old ones. Remove a retired key once no snapshot
+# needs it. Each key file must have a distinct key id.
+retired_snapshot_key_files = []
+
+[health]
+probe_interval_secs = 5
+probe_timeout_ms = 3000
+unresponsive_strikes = 3         # consecutive failed probes before a browser is replaced
+
+[egress]
+# Browser traffic leaves through a per-session loopback forwarder. With
+# block_private = true it refuses loopback, private, link-local, CGNAT,
+# multicast and cloud metadata destinations, so a page cannot reach your internal
+# network. Allow specific ranges below if you need them.
+block_private = true
+allow_cidrs = []                 # e.g. ["10.20.0.0/16"]
+
+[runtime]
+default_launch_profile = "default"
+startup_timeout_secs = 30
+
+# Launch profiles pick the browser executable and flags. `executable` is
+# optional: BROWSERX_CHROMIUM_PATH and then well-known names on PATH are used.
+# Flags the runtime manages (remote debugging, user-data-dir, proxy, headless)
+# are rejected; use the `headless` field instead. A custom browser build plugs
+# in as another profile with its own `executable`.
+#
+# Args may contain the placeholder `{persona_seed}`: a stable per-identity
+# decimal seed (derived from the profile id when the session has one, otherwise
+# from the session id) that survives recoveries, for browser builds that accept
+# a seed flag.
+#
+# Sandbox note: Chromium's sandbox needs unprivileged user namespaces (or the
+# privileges a container runtime must grant). Where they are restricted, e.g.
+# many containers and some hardened hosts, the browser fails to start; then add
+# "--no-sandbox" (and usually "--disable-gpu") to `args`. That removes a
+# security layer, so only do it for trusted content or inside a container that
+# is itself the isolation boundary.
+[runtime.launch_profiles.default]
+headless = true
+args = []
+# executable = "/usr/bin/chromium"
+# env = { LANG = "C.UTF-8" }

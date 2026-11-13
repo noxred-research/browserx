@@ -1,0 +1,279 @@
+name: ci
+
+# Workflow gate. Only code owners (the `*` rule of .github/CODEOWNERS on the default
+# branch) can run this workflow: the first job, `authorize`, checks the actor, the triggering
+# actor and, for pull requests, the author and that the head branch is not a fork. Every other
+# job needs it. The privileged fork-PR trigger and `workflow_run` are deliberately not used,
+# and the gate refuses any event outside the allow-list below.
+# Scheduled runs retain GitHub's recorded actor (the last cron/default-branch editor);
+# that user must remain a code owner. Main-branch pushes check the pusher, not commit authors.
+#
+# This gate is defense in depth. The authoritative controls are repository settings that the
+# maintainers apply: fork pull request workflows disabled (or approval required for all
+# external contributors), and a branch ruleset that requires code-owner review. A pull request
+# runs the workflow file of its own merge commit, so a change to this file is only trusted
+# after that review.
+#
+# The `browser` job is opt-in (workflow_dispatch with `run_browser_tests`): the runner hosts
+# do not ship a browser for the job user, so the default `unit` job runs the real-browser
+# tests in their skip mode. See docs/guides/operations.md and CONTRIBUTING.md.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 2 * * *" # nightly
+  workflow_dispatch:
+    inputs:
+      run_browser_tests:
+        description: "Also run the real-browser tests (needs a Chromium executable on the runner)"
+        type: boolean
+        default: false
+      chromium_path:
+        description: "Absolute path of the Chromium executable on the runner (browser tests)"
+        type: string
+        default: ""
+
+# Every action is pinned to a commit SHA (supply chain); the comment names the tag the SHA
+# was resolved from. dtolnay/rust-toolchain is pinned to a master commit and selects the
+# toolchain through `with.toolchain`; it matches rust-toolchain.toml.
+
+permissions: {}
+
+# One run per pull request and per scheduled trigger: a new push cancels the superseded
+# pull request run, while a started push or scheduled run is never cancelled.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.event.schedule || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  # Workflow gate (see the header comment). Every other job depends on this one.
+  authorize:
+    runs-on: [self-hosted, noxred]
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    outputs:
+      ok: ${{ steps.gate.outputs.ok }}
+    steps:
+      - name: Only code owners' events run workflows
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          deny() {
+            echo "::notice title=workflow gate::not run: $1"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          case "$EVENT_NAME" in
+            push|pull_request|schedule|workflow_dispatch) ;;
+            *) deny "event ${EVENT_NAME} is not allowed" ;;
+          esac
+          # CODEOWNERS comes from the default branch through the API, never from the checkout
+          # of the event under test, so a change to the file cannot authorize itself.
+          branch="${DEFAULT_BRANCH:-$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)}"
+          case "$EVENT_NAME" in
+            push) [ "$GITHUB_REF" = refs/heads/main ] || deny "push is not on main" ;;
+            schedule) [ "$GITHUB_REF" = "refs/heads/$branch" ] || deny "schedule is not on the default branch" ;;
+          esac
+          codeowners=$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/CODEOWNERS?ref=${branch}" --jq .content | base64 -d)
+          # Users owning the `*` rule (the last `*` line wins, as in GitHub). Team owners
+          # (@org/team) cannot be resolved with the workflow token and are ignored.
+          owners=$(printf '%s\n' "$codeowners" | awk '
+            $1 == "*" {
+              o = ""
+              for (i = 2; i <= NF; i++) {
+                if ($i ~ /^#/) break
+                if ($i ~ /^@[A-Za-z0-9-]+$/) o = o tolower(substr($i, 2)) "\n"
+              }
+            }
+            END { printf "%s", o }')
+          [ -n "$owners" ] || deny "no user owner for the * rule in CODEOWNERS on ${branch}"
+          is_owner() {
+            [ -n "$1" ] && printf '%s\n' "$owners" | grep -qxF -- "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+          }
+          is_owner "$ACTOR" || deny "actor is not a code owner"
+          is_owner "$TRIGGERING_ACTOR" || deny "triggering actor is not a code owner"
+          if [ "$EVENT_NAME" = pull_request ]; then
+            is_owner "$PR_AUTHOR" || deny "pull request author is not a code owner"
+            [ "$PR_HEAD_REPO" = "$GITHUB_REPOSITORY" ] || deny "pull request comes from a fork"
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+  lint:
+    runs-on: [self-hosted, noxred]
+    timeout-minutes: 45
+    needs: authorize
+    if: needs.authorize.outputs.ok == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10
+        with:
+          toolchain: "1.99.0"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny --locked check licenses advisories bans sources
+
+  workflow-lint:
+    # Static checks of the workflow files themselves: actionlint (syntax, expression types,
+    # embedded shell via shellcheck) and zizmor (script injection, excessive permissions,
+    # unpinned or impostor actions, credential persistence, cache poisoning). Both tools are
+    # pinned: actionlint by release checksum, zizmor by action SHA and exact version.
+    runs-on: [self-hosted, noxred]
+    timeout-minutes: 15
+    needs: authorize
+    if: needs.authorize.outputs.ok == 'true'
+    permissions:
+      contents: read
+    env:
+      ACTIONLINT_VERSION: "1.7.12"
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint (pinned release, sha256-verified)
+        run: |
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl -fsSL --retry 5 --retry-delay 5 -o "$archive" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/actionlint-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/actionlint-bin" actionlint
+          echo "$RUNNER_TEMP/actionlint-bin" >> "$GITHUB_PATH"
+      - run: actionlint
+      - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          version: "1.32.0"
+          inputs: .github
+          advanced-security: false
+          annotations: true
+
+  public-hygiene:
+    # Public-tree hygiene: no retired names or internal citations (hashed rule set), no host
+    # paths, no broken relative documentation links, no secret shapes in the working tree.
+    needs: authorize
+    if: needs.authorize.outputs.ok == 'true'
+    runs-on: [self-hosted, noxred]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Provenance lint
+        run: python3 ci/lint-provenance.py
+      - name: Documentation links
+        run: python3 ci/check-docs-links.py
+      - name: Install gitleaks (pinned release, sha256-verified)
+        run: |
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -fsSL --retry 5 --retry-delay 5 -o "$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
+      - name: Secret scan (working tree)
+        run: gitleaks dir . --config .gitleaks.toml --redact
+
+  unit:
+    # Real-browser tests detect a Chromium executable (BROWSERX_CHROMIUM_PATH, then PATH) and
+    # skip with a printed note when there is none; the `browser` job runs them for real.
+    runs-on: [self-hosted, noxred]
+    timeout-minutes: 60
+    needs: authorize
+    if: needs.authorize.outputs.ok == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Unit and integration tests
+        run: cargo test --workspace --locked --no-fail-fast
+
+  browser:
+    # Opt-in: run the workflow manually with `run_browser_tests` and the absolute path of a
+    # Chromium executable that exists on the runner host. The script refuses to run without it
+    # and fails when the tests would silently skip.
+    runs-on: [self-hosted, noxred]
+    timeout-minutes: 60
+    needs: authorize
+    if: needs.authorize.outputs.ok == 'true' && github.event_name == 'workflow_dispatch' && inputs.run_browser_tests
+    permissions:
+      contents: read
+    env:
+      CHROMIUM_PATH: ${{ inputs.chromium_path }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Real-browser tests
+        run: ci/run-browser-tests.sh "$CHROMIUM_PATH"
+
+  # Skipped jobs count as passed for a required check, so the gated jobs themselves cannot be
+  # required: this job always runs and fails unless the gate admitted the event and every
+  # merge-blocking job succeeded. The opt-in `browser` job is not merge-blocking.
+  required:
+    runs-on: [self-hosted, noxred]
+    timeout-minutes: 5
+    needs:
+      - authorize
+      - lint
+      - workflow-lint
+      - public-hygiene
+      - unit
+    if: always()
+    permissions: {}
+    steps:
+      - name: Gate admitted the event and every merge-blocking job passed
+        env:
+          ADMITTED: ${{ needs.authorize.outputs.ok }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          if [ "$ADMITTED" != true ]; then
+            echo "::error title=required::the workflow gate did not admit this event; a code owner must run CI"
+            exit 1
+          fi
+          failed=$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"' <<< "$NEEDS")
+          if [ -n "$failed" ]; then
+            while IFS= read -r job; do echo "::error title=required::not passed: $job"; done <<< "$failed"
+            exit 1
+          fi
+          echo "all merge-blocking jobs passed"

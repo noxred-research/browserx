@@ -1,0 +1,28 @@
+[package]
+name = "browserx-egress"
+description = "BrowserX per-session loopback forwarder: converts browser proxy traffic into upstream HTTP CONNECT or SOCKS5 tunnels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+browserx-core.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+url.workspace = true
+base64.workspace = true
+tracing.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+serde_json.workspace = true
+rcgen = "0.14"
+
+[lints]
+workspace = true

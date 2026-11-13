@@ -1,0 +1,30 @@
+# docker compose -f docker/compose.yaml up --build
+#
+# First run: create the snapshot key and an API key, then put the key's sha256
+# into docker/browserx.docker.toml (or mount your own config):
+#   docker compose -f docker/compose.yaml run --rm --entrypoint browserx browserx \
+#     snapshot-key new /var/lib/browserx/state/snapshot.key
+#   docker compose -f docker/compose.yaml run --rm --entrypoint browserx browserx keys new dev
+services:
+  browserx:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: browserx:dev
+    init: false          # the image uses tini
+    restart: unless-stopped
+    ports:
+      # Plaintext listeners: publish on loopback only; terminate TLS in front for remote use.
+      - "127.0.0.1:7690:7690"
+      - "127.0.0.1:7691:7691"
+    volumes:
+      - browserx-state:/var/lib/browserx
+      # - ./my-browserx.toml:/etc/browserx/browserx.toml:ro
+    shm_size: "1gb"      # Chromium needs a real /dev/shm
+    stop_grace_period: 45s   # final snapshots + confirmed browser shutdown
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+volumes:
+  browserx-state:
