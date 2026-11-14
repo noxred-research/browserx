@@ -19,6 +19,9 @@
 //!   `Browser.crash*`, `Browser.getBrowserCommandLine` and
 //!   `Browser.executeBrowserCommand` are refused (release a session through
 //!   the API);
+//! * `PWA.*` (`PWA.launchFilesInApp` takes host file paths, `PWA.install` a
+//!   bundle URL) and `Cast.*` (media-router traffic does not use the
+//!   forwarder) are refused;
 //! * `Target.exposeDevToolsProtocol`, `Target.openDevTools` and
 //!   `Target.setRemoteLocations` are refused: the first hands page script a
 //!   browser-level CDP channel that bypasses this filter, the others open or
@@ -115,6 +118,12 @@ impl HostPolicy {
             }
             m if m.starts_with("Browser.crash") => Some("crash commands are not allowed"),
             m if m.starts_with("Extensions.") => Some("extensions cannot be loaded"),
+            m if m.starts_with("PWA.") => {
+                Some("installing and launching apps reaches host files and the OS")
+            }
+            m if m.starts_with("Cast.") => {
+                Some("casting talks to the local network outside the session's egress policy")
+            }
             m if m.starts_with("Tracing.") => Some("tracing exposes browser-wide data"),
             m if m.starts_with("Memory.") => Some("memory commands expose browser-wide data"),
             m if m.starts_with("SystemInfo.") => Some("system information is not available"),
@@ -479,6 +488,112 @@ mod tests {
             let text = format!(r#"{{"id":8,"method":"{method}","params":{{}}}}"#);
             let text2 = text.clone();
             assert_eq!(f.client_message(&text), ClientAction::Forward(text2));
+        }
+    }
+
+    /// The policy table: which methods a dedicated relay forwards and which it
+    /// refuses. Every domain of the protocol that takes host paths, opens a
+    /// channel around the relay or does network I/O outside the forwarder must
+    /// be on the refused side.
+    #[test]
+    fn the_method_policy_table() {
+        let f = filter();
+        let refused_methods = [
+            // Host file paths.
+            "PWA.install",
+            "PWA.launchFilesInApp",
+            "PWA.launch",
+            "PWA.openCurrentPageInApp",
+            "PWA.uninstall",
+            "PWA.getOsAppState",
+            "PWA.changeAppUserSettings",
+            "DOM.setFileInputFiles",
+            "Page.handleFileChooser",
+            "Extensions.loadUnpacked",
+            // Network I/O outside the forwarder.
+            "Cast.enable",
+            "Cast.setSinkToUse",
+            "Cast.startDesktopMirroring",
+            "Cast.startTabMirroring",
+            "Cast.stopCasting",
+            "Tethering.bind",
+            // Channels around the relay, and browser-wide data.
+            "Target.exposeDevToolsProtocol",
+            "Target.openDevTools",
+            "Target.setRemoteLocations",
+            "Target.sendMessageToTarget",
+            "Browser.getBrowserCommandLine",
+            "Browser.executeBrowserCommand",
+            "Browser.close",
+            "Browser.crash",
+            "Tracing.start",
+            "Memory.getDOMCounters",
+            "SystemInfo.getInfo",
+            // Domains nobody has reviewed.
+            "CacheStorage.requestCacheNames",
+            "FindInPage.find",
+            "NoSuchDomain.run",
+        ];
+        for method in refused_methods {
+            let text = format!(r#"{{"id":1,"method":"{method}","params":{{}}}}"#);
+            refused(f.client_message(&text));
+            let text = format!(r#"{{"id":1,"sessionId":"S","method":"{method}","params":{{}}}}"#);
+            refused(f.client_message(&text));
+        }
+        let forwarded_methods = [
+            "Target.createTarget",
+            "Target.attachToTarget",
+            "Target.attachToBrowserTarget",
+            "Target.setAutoAttach",
+            "Target.getTargets",
+            "Target.createBrowserContext",
+            "Browser.getVersion",
+            "Browser.setWindowBounds",
+            "Browser.setPermission",
+            "Page.enable",
+            "Page.navigate",
+            "Page.captureScreenshot",
+            "Page.printToPDF",
+            "Runtime.evaluate",
+            "Runtime.addBinding",
+            "Network.enable",
+            "Network.setCookie",
+            "Fetch.enable",
+            "Fetch.fulfillRequest",
+            "DOM.getDocument",
+            "Input.dispatchMouseEvent",
+            "Emulation.setDeviceMetricsOverride",
+            "Storage.getCookies",
+            "IndexedDB.requestDatabaseNames",
+            "ServiceWorker.enable",
+            "Debugger.enable",
+            "Profiler.start",
+            "Security.setIgnoreCertificateErrors",
+            "WebAuthn.enable",
+            "Accessibility.getFullAXTree",
+        ];
+        for method in forwarded_methods {
+            let text = format!(
+                r#"{{"id":2,"method":"{method}","params":{{"url":"http://example.test/"}}}}"#
+            );
+            assert!(
+                matches!(f.client_message(&text), ClientAction::Forward(_)),
+                "{method} must be forwarded"
+            );
+        }
+        for domain in [
+            "PWA",
+            "Cast",
+            "Tethering",
+            "Extensions",
+            "Tracing",
+            "Memory",
+            "SystemInfo",
+        ] {
+            assert!(
+                !PAGE_DOMAINS.contains(&domain),
+                "{domain} must not be allowed"
+            );
         }
     }
 

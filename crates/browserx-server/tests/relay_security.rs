@@ -334,6 +334,26 @@ async fn dedicated_relay_refuses_cdp_escape_hatches() {
         ),
         ("Tethering.bind", json!({"port": 1})),
         ("NoSuchDomain.run", json!({})),
+        // Host files and the local network through the app and cast domains.
+        (
+            "PWA.install",
+            json!({"manifestId": "file:///", "installUrlOrBundleUrl": "file:///etc/hostname"}),
+        ),
+        (
+            "PWA.launchFilesInApp",
+            json!({"manifestId": "http://example.test/", "files": ["/etc/hostname"]}),
+        ),
+        (
+            "PWA.openCurrentPageInApp",
+            json!({"manifestId": "http://example.test/"}),
+        ),
+        (
+            "PWA.getOsAppState",
+            json!({"manifestId": "http://example.test/"}),
+        ),
+        ("Cast.enable", json!({})),
+        ("Cast.setSinkToUse", json!({"sinkName": "x"})),
+        ("Cast.startTabMirroring", json!({"sinkName": "x"})),
     ] {
         let r = c.call(method, params.clone()).await;
         assert!(refused(&r), "{method}: {r}");
