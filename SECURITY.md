@@ -11,7 +11,7 @@ We take the security of BrowserX and of the people who run it seriously. This pa
 | 0.1.x | Yes |
 | Earlier than 0.1.0 | No |
 
-BrowserX is pre-1.0. Only the latest 0.1.x release (and the `main` branch) receives security fixes. The distribution is the source repository and tagged source releases. No binaries, container images, hosted service or crates.io packages are published, so there are no other artifacts to patch. The Dockerfile and Compose file in [`docker/`](docker) are for development and evaluation: do not expose a container started from them to a network you do not control.
+BrowserX is pre-1.0. Only the latest 0.1.x release (and the `main` branch) receives security fixes. The distribution is the source repository and tagged source releases. No binaries, container images, hosted service or crates.io packages are published, so there are no other artifacts to patch. The Dockerfile and Compose file in [`docker/`](docker) are for development and evaluation: do not expose a container started from them to a network you do not control. Every container image they and the CI scripts use is pinned by digest.
 
 ### Automated security checks
 
@@ -87,7 +87,7 @@ This safe harbor covers the BrowserX project only. It does not authorize testing
 - what a model says or concludes: an advisory tool (`summarize_page`, `extract_data`, `diagnose`) that returns wrong, incomplete or manipulated text is a quality issue, not a vulnerability, unless it also bypasses a control listed above;
 - prompt injection that only changes the model's wording or choices inside the scope, capabilities and limits the operator configured;
 - the behavior and data handling of the third-party model endpoint an operator configures under `[ai]`;
-- the development defaults of the files in `docker/`;
+- the development defaults of the files in `docker/`, except that the shipped configuration must keep Chromium's sandbox on;
 - reports from automated scanners without a demonstrated impact, and social engineering of maintainers;
 - abuse of BrowserX by third parties against systems you operate. We cannot act on deployments we do not run; report that activity to the operator or hosting provider concerned.
 
@@ -102,7 +102,18 @@ Knowing what a deployment holds helps you judge impact and protect it.
 - **Proxy passwords** of a session are held in the lease registry (needed to recover the session) and are write-only through the API.
 - **MCP server configuration** names the worker URL and files holding the worker API key and the optional `[ai]` key; keys are read from files and never inline. The optional HTTP listener stores only the SHA-256 digest of its bearer token.
 - **The MCP audit log** records every tool call with sensitive arguments redacted, the operator and the authorization note, in a hash-chained JSONL file with mode `0600`. It can still contain URLs and page text excerpts, so protect it like a log of your engagement.
-- **Browsers** execute whatever pages their clients open, with the privileges of the worker's user. Isolate workers accordingly.
+- **Browsers** execute whatever pages their clients open, with the privileges of the worker's user. Isolate workers accordingly. A browser does not inherit the worker's environment (only an allow-list and the launch profile's `env`).
+- **Secrets read from the environment** (`BROWSERX_DATABASE_PASSWORD`, `BROWSERX_OBJECT_STORE_*`, `BROWSERX_*_PASSWORD`) stay in the worker's own environment: Rust 2024 makes `remove_var` unsafe and the project forbids `unsafe`, so the worker cannot scrub them. What protects them is that the worker marks itself non-dumpable at startup (`prctl(PR_SET_DUMPABLE, 0)`): other processes of the same user cannot read `/proc/<worker>/environ` or its memory, and cannot `ptrace`-attach to it. Browsers do not inherit the environment at all. The cost is that a same-user `gdb -p` or `strace -p` on the worker is refused and the worker writes no core dump; debug it as root, or start it under the debugger. The setting does not protect against root or a process with `CAP_SYS_PTRACE`, and it is not a substitute for the `*_file` form, which leaves nothing in the environment: use that.
+
+## Deployment requirements
+
+- **Chromium's sandbox is on by default.** `--no-sandbox` is an explicit opt-in in a launch profile and **removes the boundary between a renderer bug and the whole worker** (snapshot key, lease database, every tenant's profiles). The container configuration in [`docker/`](docker) does not use it. Container runtimes usually block the user namespaces the sandbox needs; [`docker/seccomp-chromium.json`](docker/seccomp-chromium.json) is the default Docker profile (moby/profiles `seccomp/default.json` at commit `9ee3204`) with `clone`, `unshare`, `setns` and `chroot` allowed without the `CAP_SYS_ADMIN` / `CAP_SYS_CHROOT` condition, and Compose applies it. With `docker run`, pass `--security-opt seccomp=docker/seccomp-chromium.json`. Only if your runtime cannot allow user namespaces, add `--no-sandbox` knowingly, run a single trust domain per worker and browse only content you trust.
+- **The worker host or container must be single-tenant.** A browser's DevTools port and each session's egress forwarder listen on `127.0.0.1` without authentication and trust any local user. Run no other untrusted uid on the host, and give each worker its own container or network namespace.
+- **Prefer `*_file` for secrets** (see above).
+
+## Maintainer rules
+
+- **Never approve a workflow run from a fork without reading that pull request's diff of `.github/` first.** The `authorize` gate lives in a workflow file that a pull request can edit, so approval of a fork run executes whatever that diff says on the project's runners. Approve only after you have read every changed workflow, action reference and CI script.
 
 See [isolation and security](docs/design/isolation-and-security.md) for the threat model.
 

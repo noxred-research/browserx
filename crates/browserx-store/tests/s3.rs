@@ -859,7 +859,7 @@ impl Server {
         let probe_creds = creds.clone();
         let service = Service::start(
             &Spec {
-                image: "docker.io/chrislusf/seaweedfs:latest",
+                image: "docker.io/chrislusf/seaweedfs:latest@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0",
                 ports: &[8333],
                 env: &[&key_env, &secret_env],
                 tmpfs: &["/data"],

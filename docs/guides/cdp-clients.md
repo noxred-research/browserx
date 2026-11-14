@@ -14,7 +14,7 @@ Any client that can connect to a Chrome DevTools Protocol WebSocket can use a Br
 
 | Session | `cdp_url` points at | Behaves like |
 | --- | --- | --- |
-| `dedicated_browser` | A browser-level endpoint relayed to your own Chromium process | A normal remote browser: create targets, attach to them, use any domain |
+| `dedicated_browser` | A browser-level endpoint relayed to your own Chromium process | A normal remote browser: create targets, attach to them, use the page-level domains. The relay refuses `Target.exposeDevToolsProtocol`, `Target.openDevTools`, `Target.setRemoteLocations`, `Tracing`, `Memory`, `SystemInfo`, `Extensions` and a few host-level `Browser` commands (see [host-protection rules](../design/isolation-and-security.md#host-protection-rules)) |
 | `shared_browser` | A scoped endpoint | The same, restricted to your browser context. Creating or disposing contexts, `Browser.close` and cross-context attachment are refused |
 
 A client that needs `Target.createBrowserContext` for its own purposes needs dedicated isolation. A client written for a browser-level endpoint usually works unchanged with either.

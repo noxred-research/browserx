@@ -21,9 +21,13 @@ snapshot_key_file = "/var/lib/browserx/keys/snapshot.key"
 
 [runtime.launch_profiles.default]
 headless = true
-# Chromium's sandbox needs user namespaces, which container runtimes usually
-# block by default. Either run the container with a seccomp profile that allows
-# them (and remove --no-sandbox below), or accept --no-sandbox with the
-# container as the isolation boundary. Only browse content you trust.
+# Chromium's sandbox stays ON. It needs user namespaces, which the default
+# container seccomp profile blocks: start the container with the profile in
+# docker/seccomp-chromium.json (compose.yaml already does; with `docker run`
+# add `--security-opt seccomp=docker/seccomp-chromium.json`).
+#
+# Adding "--no-sandbox" to args is an explicit opt-in. The browser then runs
+# with the full privileges of the worker (snapshot key, lease database and every
+# profile) and one renderer bug compromises all of it: see SECURITY.md.
 # --disable-dev-shm-usage avoids the small default /dev/shm; compose also sets shm_size.
-args = ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
+args = ["--disable-gpu", "--disable-dev-shm-usage"]

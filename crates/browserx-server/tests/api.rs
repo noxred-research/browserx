@@ -490,6 +490,14 @@ async fn dedicated_relay_forwards_everything_except_what_endangers_the_host() {
         ("Page.navigate", json!({"url": "file:///etc/hostname"})),
         ("Tracing.start", json!({})),
         ("DOM.setFileInputFiles", json!({"files": ["/etc/hostname"]})),
+        (
+            "Target.exposeDevToolsProtocol",
+            json!({"targetId": "T", "bindingName": "cdp"}),
+        ),
+        ("Target.openDevTools", json!({"targetId": "T"})),
+        ("Target.setRemoteLocations", json!({"locations": []})),
+        ("Browser.getBrowserCommandLine", json!({})),
+        ("Tethering.bind", json!({"port": 1})),
     ]
     .iter()
     .enumerate()
@@ -504,6 +512,11 @@ async fn dedicated_relay_forwards_everything_except_what_endangers_the_host() {
         "Page.navigate",
         "Tracing.start",
         "DOM.setFileInputFiles",
+        "Target.exposeDevToolsProtocol",
+        "Target.openDevTools",
+        "Target.setRemoteLocations",
+        "Browser.getBrowserCommandLine",
+        "Tethering.bind",
     ] {
         assert!(
             !reached.iter().any(|m| m == banned),

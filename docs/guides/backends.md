@@ -13,7 +13,7 @@ BrowserX runs on SQLite files and a snapshot directory with no other service. Th
 | Audit records in Kafka or RabbitMQ | `[events]` | MCP configuration |
 | Audit records searchable in OpenSearch or Elasticsearch | `[search]` | MCP configuration |
 
-Secrets (passwords, access keys, API keys) are read from files or environment variables, never from the configuration text. A URL that contains a password is refused. Unknown keys are refused. A backend that is configured but cannot be used at startup is an error, except where this page says the server degrades (the cache) or drops and counts (the audit sinks).
+Secrets (passwords, access keys, API keys) are read from files or environment variables, never from the configuration text. Prefer files: browsers do not inherit the worker's environment, and the worker is non-dumpable so same-user processes cannot read its `/proc/<pid>/environ`, but a file leaves nothing in the environment at all (see [SECURITY.md](../../SECURITY.md#what-browserx-handles)). A URL that contains a password is refused. Unknown keys are refused. A backend that is configured but cannot be used at startup is an error, except where this page says the server degrades (the cache) or drops and counts (the audit sinks).
 
 ## Relational: `[database]`
 

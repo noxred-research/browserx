@@ -18,7 +18,7 @@ use lapin::options::{
 use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind};
 use serde_json::Value;
 
-const IMAGE: &str = "docker.io/library/rabbitmq:4-management";
+const IMAGE: &str = "docker.io/library/rabbitmq:4-management@sha256:753099a19b577c322117f793f864b3129cbba96d40317221a69d73976e3c843c";
 const USER: &str = "bx";
 const PASSWORD: &str = "synthetic-amqp-password";
 

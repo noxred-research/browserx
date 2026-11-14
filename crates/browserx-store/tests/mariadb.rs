@@ -15,7 +15,7 @@ use browserx_store::{DatabaseConfig, MariaDbLeaseStore, TlsMode};
 use common::services::{self, Service, Spec};
 use mysql_async::prelude::Queryable;
 
-const IMAGE: &str = "docker.io/library/mariadb:11.8";
+const IMAGE: &str = "docker.io/library/mariadb:11.8@sha256:d36f18d65a0459510b8b0f643b226a6d299e3206486e2b64ff20754a6d291707";
 
 /// A running server plus a private password file for it.
 struct Maria {

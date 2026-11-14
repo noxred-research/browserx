@@ -148,7 +148,7 @@ The default CI job runs the test suite without a browser: tests that need Chromi
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
 | `browserx doctor` cannot find Chromium | Not installed or not on `PATH` | Install it or set `BROWSERX_CHROMIUM_PATH` |
-| Browser exits at once in a container | Sandbox cannot start | Allow user namespaces, or use a launch profile with `--no-sandbox` knowingly |
+| Browser exits at once in a container | Sandbox cannot start | Run with `--security-opt seccomp=docker/seccomp-chromium.json` (user namespaces); `--no-sandbox` only knowingly, see [SECURITY.md](../../SECURITY.md#deployment-requirements) |
 | `429 capacity` | Queue full, quota reached or `max_browsers` exhausted | Check `browserx_queue_depth`, raise limits or add workers |
 | `409 profile_locked` | A running browser holds the profile | Release the other session, or choose another `profile_id` |
 | `409 stale_generation` | The lease moved on (recovery or handoff) | Read the session, then re-attach |

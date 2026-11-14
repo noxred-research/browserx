@@ -32,14 +32,14 @@ struct Engine {
 
 const VALKEY: Engine = Engine {
     name: "valkey",
-    image: "docker.io/valkey/valkey:8.1.3-alpine",
+    image: "docker.io/valkey/valkey:8.1.3-alpine@sha256:d827e7f7552cdee40cc7482dbae9da020f42bc47669af6f71182a4ef76a22773",
     server_bin: "valkey-server",
     cli: "valkey-cli",
 };
 
 const REDIS: Engine = Engine {
     name: "redis",
-    image: "docker.io/library/redis:8-alpine",
+    image: "docker.io/library/redis:8-alpine@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3",
     server_bin: "redis-server",
     cli: "redis-cli",
 };
