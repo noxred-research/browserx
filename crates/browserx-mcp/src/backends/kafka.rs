@@ -167,15 +167,25 @@ impl KafkaSection {
         if self.tls_ca_file.is_some() && !self.tls {
             return Err(bad("events.tls_ca_file needs events.tls = true"));
         }
+        // A client follows the broker addresses the cluster advertises, not just
+        // the bootstrap list, and cannot see them before it connects. A loopback
+        // bootstrap (a tunnel, a sidecar) therefore proves nothing about where a
+        // SASL password goes, so SASL always needs TLS or an explicit opt-out.
+        let plaintext_sasl = !self.tls && self.sasl.is_some();
         let plaintext_remote = !self.tls && !all_loopback;
+        if plaintext_sasl && !self.allow_plaintext {
+            return Err(bad(
+                "events.sasl without events.tls sends the SASL password and the audit records in clear, and the brokers can advertise other addresses: set events.tls = true or events.allow_plaintext = true",
+            ));
+        }
         if plaintext_remote && !self.allow_plaintext {
             return Err(bad(
                 "events.brokers are plain connections to hosts that are not loopback: set events.tls = true or events.allow_plaintext = true",
             ));
         }
-        if self.allow_plaintext && !plaintext_remote {
+        if self.allow_plaintext && !(plaintext_remote || plaintext_sasl) {
             return Err(bad(
-                "events.allow_plaintext only applies to plain connections to brokers that are not loopback",
+                "events.allow_plaintext only applies to plain connections to brokers that are not loopback, or to SASL without events.tls",
             ));
         }
         if let Some(sasl) = &self.sasl
@@ -507,7 +517,7 @@ mod tests {
     #[test]
     fn valid_and_invalid_sections() {
         let ok = parse(
-            "[events]\nkind = \"kafka\"\nbrokers = [\"127.0.0.1:9092\"]\n[events.sasl]\nusername = \"u\"\npassword_file = \"pw\"\n",
+            "[events]\nkind = \"kafka\"\nbrokers = [\"127.0.0.1:9092\"]\ntls = true\n[events.sasl]\nusername = \"u\"\npassword_file = \"pw\"\n",
         )
         .unwrap();
         let Some(crate::backends::export::EventsSection::Kafka(section)) = ok.events else {
@@ -549,6 +559,14 @@ mod tests {
                 "[events]\nkind = \"kafka\"\nbrokers = [\"127.0.0.1:9092\"]\n[events.sasl]\nmechanism = \"gssapi\"\nusername = \"u\"\n",
                 "unknown mechanism",
             ),
+            (
+                "[events]\nkind = \"kafka\"\nbrokers = [\"127.0.0.1:9092\"]\n[events.sasl]\nusername = \"u\"\npassword_file = \"pw\"\n",
+                "sasl without tls, even to a loopback bootstrap",
+            ),
+            (
+                "[events]\nkind = \"kafka\"\nbrokers = [\"kafka:9093\"]\ntls = true\nallow_plaintext = true\n[events.sasl]\nusername = \"u\"\npassword_file = \"pw\"\n",
+                "allow_plaintext on a tls connection",
+            ),
             ("[events]\nkind = \"nats\"\n", "unknown kind"),
             (
                 "[events]\nkind = \"none\"\nbrokers = [\"a:1\"]\n",
@@ -567,5 +585,26 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn sasl_needs_tls_or_an_explicit_opt_out() {
+        let sasl = "[events.sasl]\nusername = \"u\"\npassword_file = \"pw\"\n";
+        let plain = |brokers: &str, flags: &str| {
+            parse(&format!(
+                "[events]\nkind = \"kafka\"\nbrokers = [\"{brokers}\"]\n{flags}{sasl}"
+            ))
+        };
+        let err = plain("127.0.0.1:9092", "").unwrap_err().to_string();
+        assert!(err.contains("events.sasl without events.tls"), "{err}");
+        let err = plain("kafka.example:9092", "").unwrap_err().to_string();
+        assert!(err.contains("events.sasl without events.tls"), "{err}");
+        // The explicit opt-out is accepted for a loopback bootstrap and a remote one.
+        plain("127.0.0.1:9092", "allow_plaintext = true\n").unwrap();
+        plain("kafka.example:9092", "allow_plaintext = true\n").unwrap();
+        // TLS needs no opt-out.
+        plain("127.0.0.1:9092", "tls = true\n").unwrap();
+        // No SASL, loopback, plain: still fine.
+        parse("[events]\nkind = \"kafka\"\nbrokers = [\"127.0.0.1:9092\"]\n").unwrap();
     }
 }

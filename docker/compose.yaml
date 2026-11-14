@@ -1,5 +1,9 @@
 # docker compose -f docker/compose.yaml up --build
 #
+# Without Compose, pass the profile yourself, or Chromium's sandbox cannot start:
+#   docker run --security-opt seccomp=docker/seccomp-chromium.json --cap-drop ALL \
+#     --security-opt no-new-privileges:true --shm-size 1g browserx:dev
+#
 # First run: create the snapshot key and an API key, then put the key's sha256
 # into docker/browserx.docker.toml (or mount your own config):
 #   docker compose -f docker/compose.yaml run --rm --entrypoint browserx browserx \
@@ -25,6 +29,10 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+      # Default Docker profile plus the user-namespace syscalls Chromium's
+      # sandbox needs, so the sandbox stays on (derived from moby/profiles
+      # seccomp/default.json at 9ee3204). Path is relative to this file.
+      - seccomp=./seccomp-chromium.json
     read_only: false
 volumes:
   browserx-state:

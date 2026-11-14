@@ -12,7 +12,7 @@ use browserx_core::{Clock, Error, Generation, LeaseStore, Secret, SessionStatus}
 use browserx_store::{DatabaseConfig, PostgresLeaseStore, TlsMode};
 use common::services::{self, Service, Spec};
 
-const IMAGE: &str = "docker.io/library/postgres:18";
+const IMAGE: &str = "docker.io/library/postgres:18@sha256:b9f6b8ff03b62f3cfd9d9ba3fe56226a9991c79d3fb46fd46536263bf02be553";
 
 /// A running server plus a private password file for it.
 struct Pg {

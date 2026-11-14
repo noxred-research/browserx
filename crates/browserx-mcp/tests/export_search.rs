@@ -13,8 +13,8 @@ use common::export_kit::{
 use common::services::{self, Service, Spec};
 use serde_json::{Value, json};
 
-const OPENSEARCH: &str = "docker.io/opensearchproject/opensearch:2";
-const ELASTICSEARCH: &str = "docker.elastic.co/elasticsearch/elasticsearch:8.15.3";
+const OPENSEARCH: &str = "docker.io/opensearchproject/opensearch:2@sha256:3bfa1ec74d56928c2e018033d45c460ce2c0ea65a5cedd577de3102326c31b89";
+const ELASTICSEARCH: &str = "docker.elastic.co/elasticsearch/elasticsearch:8.15.3@sha256:01c1732062b4a846c5ca687b0094b89bad0bfed00c6d71626db32fb8f3131a78";
 const ADMIN_PASSWORD: &str = "Synthetic-Pass-7391!";
 
 #[derive(Clone)]

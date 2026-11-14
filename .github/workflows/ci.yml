@@ -148,7 +148,9 @@ jobs:
     # Static checks of the workflow files themselves: actionlint (syntax, expression types,
     # embedded shell via shellcheck) and zizmor (script injection, excessive permissions,
     # unpinned or impostor actions, credential persistence, cache poisoning). Both tools are
-    # pinned: actionlint by release checksum, zizmor by action SHA and exact version.
+    # pinned: actionlint by release checksum, zizmor by action SHA and exact version. A script
+    # also refuses any job that does not run on the self-hosted runners and any Dependabot
+    # configuration (ci/check-self-hosted-only.py).
     runs-on: [self-hosted, noxred]
     timeout-minutes: 15
     needs: authorize
@@ -162,6 +164,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runners only, no Dependabot version updates
+        run: |
+          python3 ci/check-self-hosted-only.py --self-test
+          python3 ci/check-self-hosted-only.py
       - name: Install actionlint (pinned release, sha256-verified)
         run: |
           archive="$RUNNER_TEMP/actionlint.tar.gz"
@@ -198,6 +204,8 @@ jobs:
         run: python3 ci/lint-provenance.py
       - name: Documentation links
         run: python3 ci/check-docs-links.py
+      - name: Container images pinned by digest
+        run: python3 ci/check-image-pins.py
       - name: Install gitleaks (pinned release, sha256-verified)
         run: |
           archive="$RUNNER_TEMP/gitleaks.tar.gz"

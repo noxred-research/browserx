@@ -21,6 +21,7 @@ mod auth;
 mod config;
 mod dto;
 mod error;
+pub mod hardening;
 pub mod host_policy;
 mod limits;
 mod listener;

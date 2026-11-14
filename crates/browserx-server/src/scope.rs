@@ -49,8 +49,15 @@ const INTERNAL_ID_END: i64 = 2_147_000_000;
 /// Upstream commands queued at most between two drains.
 const MAX_UPSTREAM_QUEUE: usize = 256;
 
-/// Protocol domains a page session may use. Anything else is refused.
-const PAGE_DOMAINS: &[&str] = &[
+/// Protocol domains a relay client may use (page sessions of a shared relay, and
+/// every session of a dedicated relay). Anything else is refused.
+///
+/// Every domain here has been checked for commands that take host file paths,
+/// open a channel to the browser the relay cannot see, or do network I/O
+/// outside the session's forwarder. `PWA` (installs apps from a bundle URL or
+/// path and launches them with host files) and `Cast` (media-router discovery
+/// and mirroring talk to the local network directly) are deliberately absent.
+pub(crate) const PAGE_DOMAINS: &[&str] = &[
     "Accessibility",
     "Animation",
     "Audits",
@@ -59,7 +66,6 @@ const PAGE_DOMAINS: &[&str] = &[
     "BluetoothEmulation",
     "Browser",
     "CSS",
-    "Cast",
     "Console",
     "DOM",
     "DOMDebugger",
@@ -84,7 +90,6 @@ const PAGE_DOMAINS: &[&str] = &[
     "Media",
     "Network",
     "Overlay",
-    "PWA",
     "Page",
     "Performance",
     "PerformanceTimeline",

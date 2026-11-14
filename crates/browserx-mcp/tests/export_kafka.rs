@@ -15,7 +15,7 @@ use rskafka::client::ClientBuilder;
 use rskafka::client::partition::{OffsetAt, UnknownTopicHandling};
 use serde_json::Value;
 
-const IMAGE: &str = "docker.io/apache/kafka:latest";
+const IMAGE: &str = "docker.io/apache/kafka:latest@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837";
 const KAFKA_BIN: &str = "/opt/kafka/bin/kafka-topics.sh";
 const SASL_USER: &str = "bx";
 const SASL_PASSWORD: &str = "synthetic-kafka-password";
@@ -274,7 +274,7 @@ async fn sasl_plain_authenticates_and_a_wrong_password_does_not() {
     secret_file(dir.path(), "bad.pw", "wrong-password-value");
     let sasl = |pw: &str| {
         format!(
-            "{}[events.sasl]\nmechanism = \"plain\"\nusername = \"{SASL_USER}\"\npassword_file = \"{pw}\"\n",
+            "{}allow_plaintext = true\n[events.sasl]\nmechanism = \"plain\"\nusername = \"{SASL_USER}\"\npassword_file = \"{pw}\"\n",
             section(broker.sasl.port, "browserx.")
         )
     };

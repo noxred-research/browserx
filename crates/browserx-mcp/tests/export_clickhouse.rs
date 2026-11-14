@@ -12,7 +12,7 @@ use common::export_kit::{
 use common::services::{self, Service, Spec};
 use serde_json::Value;
 
-const IMAGE: &str = "docker.io/clickhouse/clickhouse-server:latest";
+const IMAGE: &str = "docker.io/clickhouse/clickhouse-server:latest@sha256:4f491abc44d9f4a1747c033c35ddd5bc385521305d85ca8251ba0824ff597035";
 const USER: &str = "bxtest";
 const PASSWORD: &str = "synthetic-clickhouse-password";
 

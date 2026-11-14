@@ -243,6 +243,7 @@ fn task_error(
 
 /// Runs a server from configuration until `shutdown` resolves.
 pub async fn run(cfg: Config, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
+    crate::hardening::harden_process()?;
     let (pool, state) = build(&cfg).await?;
     let bind = |what: &'static str, addr: std::net::SocketAddr| async move {
         TcpListener::bind(addr)

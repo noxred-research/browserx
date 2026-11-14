@@ -1,6 +1,7 @@
 //! Spawning and supervising one browser process group.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -27,6 +28,54 @@ pub(crate) const SIGNAL_GRACE: Duration = Duration::from_secs(5);
 const ENDPOINT_MARKER: &str = "DevTools listening on ";
 /// Fallback poll interval of the exit watcher; SIGCHLD normally wakes it sooner.
 const EXIT_POLL: Duration = Duration::from_millis(200);
+
+/// Environment variables the browser inherits from the worker; everything else
+/// (database and object-store credentials, tokens, proxy settings, ...) is
+/// dropped. The launch profile's own `env` is added on top.
+const INHERITED_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_DIRS",
+    "XDG_DATA_DIRS",
+    "FONTCONFIG_PATH",
+    "FONTCONFIG_FILE",
+    // Headed browsers need to find their display.
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+];
+/// Variable-name prefix inherited as well (`LC_ALL`, `LC_CTYPE`, ...).
+const INHERITED_ENV_PREFIX: &str = "LC_";
+
+/// The browser's environment: the allow-listed part of `parent`, then the
+/// launch profile's `env` (which wins).
+fn browser_env(
+    parent: impl IntoIterator<Item = (OsString, OsString)>,
+    profile: &BTreeMap<String, String>,
+) -> BTreeMap<OsString, OsString> {
+    let allowed = |name: &OsStr| {
+        name.to_str().is_some_and(|n| {
+            INHERITED_ENV.contains(&n)
+                || n.strip_prefix(INHERITED_ENV_PREFIX)
+                    .is_some_and(|rest| !rest.is_empty())
+        })
+    };
+    let mut env: BTreeMap<OsString, OsString> =
+        parent.into_iter().filter(|(k, _)| allowed(k)).collect();
+    for (key, value) in profile {
+        env.insert(key.into(), value.into());
+    }
+    env
+}
 
 /// How the process ended.
 #[derive(Clone, Debug)]
@@ -178,7 +227,8 @@ pub(crate) async fn spawn(
 ) -> Result<(Proc, String)> {
     let mut child = Command::new(executable)
         .args(args)
-        .envs(env)
+        .env_clear()
+        .envs(browser_env(std::env::vars_os(), env))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -463,5 +513,98 @@ mod tests {
         assert!(matches!(err, Error::Storage(_)), "{err:?}");
         assert_ne!(seen.get(), 0);
         assert!(!Path::new(&format!("/proc/{}", seen.get())).exists());
+    }
+    fn os(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+            .collect()
+    }
+
+    #[test]
+    fn browser_env_keeps_the_allow_list_and_drops_secrets() {
+        let parent = os(&[
+            ("PATH", "/usr/bin"),
+            ("HOME", "/var/lib/worker"),
+            ("TMPDIR", "/tmp"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C"),
+            ("TZ", "UTC"),
+            ("XDG_CONFIG_HOME", "/cfg"),
+            ("FONTCONFIG_PATH", "/etc/fonts"),
+            ("BROWSERX_DATABASE_PASSWORD", "db-secret"),
+            ("BROWSERX_OBJECT_STORE_SECRET_ACCESS_KEY", "s3-secret"),
+            ("BROWSERX_OBJECT_STORE_SESSION_TOKEN", "s3-token"),
+            ("BROWSERX_EVENTS_PASSWORD", "kafka-secret"),
+            ("GITHUB_TOKEN", "ghp_x"),
+            ("AWS_SECRET_ACCESS_KEY", "aws"),
+            ("HTTPS_PROXY", "http://proxy.invalid:3128"),
+            ("LC_", "not a locale category"),
+            ("LCX", "x"),
+        ]);
+        let profile = BTreeMap::from([
+            ("TZ".to_owned(), "Europe/Berlin".to_owned()),
+            ("CHROME_FLAG".to_owned(), "1".to_owned()),
+        ]);
+        let env = browser_env(parent, &profile);
+        let names: Vec<&str> = env.keys().filter_map(|k| k.to_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "CHROME_FLAG",
+                "FONTCONFIG_PATH",
+                "HOME",
+                "LANG",
+                "LC_ALL",
+                "PATH",
+                "TMPDIR",
+                "TZ",
+                "XDG_CONFIG_HOME"
+            ]
+        );
+        assert_eq!(env[OsStr::new("TZ")], "Europe/Berlin", "profile env wins");
+    }
+
+    #[tokio::test]
+    async fn the_spawned_browser_does_not_inherit_the_workers_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("environ");
+        // `sh -c` instead of a script file: writing and executing files from
+        // concurrently running tests can race on `ETXTBSY`.
+        let script = format!(
+            "tr '\\0' '\\n' < /proc/$$/environ > '{}'; echo 'DevTools listening on ws://127.0.0.1:1/devtools/browser/x' >&2; exec sleep 300",
+            out.display()
+        );
+        let args = ["-c".to_owned(), script];
+        // cargo sets these for every test process; a browser must not see them.
+        let leaked: Vec<String> = std::env::vars_os()
+            .filter_map(|(k, _)| k.into_string().ok())
+            .filter(|k| !INHERITED_ENV.contains(&k.as_str()) && !k.starts_with("LC_"))
+            .collect();
+        assert!(
+            leaked.iter().any(|k| k == "CARGO_MANIFEST_DIR"),
+            "the test needs a non-allow-listed variable in its own environment"
+        );
+        let profile = BTreeMap::from([("BX_PROFILE_VAR".to_owned(), "kept".to_owned())]);
+        let (proc, _) = spawn(
+            Path::new("/bin/sh"),
+            &args,
+            &profile,
+            Duration::from_secs(10),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let dumped = tokio::fs::read_to_string(&out).await.unwrap();
+        let names: Vec<&str> = dumped
+            .lines()
+            .filter_map(|l| l.split_once('=').map(|(k, _)| k))
+            .collect();
+        for k in &leaked {
+            assert!(!names.contains(&k.as_str()), "{k} leaked into the browser");
+        }
+        assert!(names.contains(&"BX_PROFILE_VAR"), "{names:?}");
+        assert!(names.contains(&"PATH") || std::env::var_os("PATH").is_none());
+        proc.terminate().await.unwrap();
     }
 }

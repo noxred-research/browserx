@@ -302,6 +302,95 @@ async fn dedicated_relay_protects_the_host() {
     );
 }
 
+/// A dedicated relay refuses the commands that would hand a page (or the
+/// client) a browser-level channel the relay cannot see, and the host-reaching
+/// commands stay refused on it. Every refusal is answered by the relay and
+/// leaves the browser unchanged.
+#[tokio::test]
+async fn dedicated_relay_refuses_cdp_escape_hatches() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(s) = start_real(dir.path()).await else {
+        return;
+    };
+    let created = s.create(json!({})).await;
+    let mut c = Cdp::open(created["cdp_url"].as_str().unwrap()).await;
+    let (target, session) = c.page().await;
+
+    // Browser-level and page-session addressing are both refused.
+    for (method, params) in [
+        (
+            "Target.exposeDevToolsProtocol",
+            json!({"targetId": target, "bindingName": "cdpEscape"}),
+        ),
+        ("Target.openDevTools", json!({"targetId": target})),
+        (
+            "Target.setRemoteLocations",
+            json!({"locations": [{"host": "127.0.0.1", "port": 9}]}),
+        ),
+        ("Browser.getBrowserCommandLine", json!({})),
+        (
+            "Browser.executeBrowserCommand",
+            json!({"commandId": "openTabSearch"}),
+        ),
+        ("Tethering.bind", json!({"port": 1})),
+        ("NoSuchDomain.run", json!({})),
+        // Host files and the local network through the app and cast domains.
+        (
+            "PWA.install",
+            json!({"manifestId": "file:///", "installUrlOrBundleUrl": "file:///etc/hostname"}),
+        ),
+        (
+            "PWA.launchFilesInApp",
+            json!({"manifestId": "http://example.test/", "files": ["/etc/hostname"]}),
+        ),
+        (
+            "PWA.openCurrentPageInApp",
+            json!({"manifestId": "http://example.test/"}),
+        ),
+        (
+            "PWA.getOsAppState",
+            json!({"manifestId": "http://example.test/"}),
+        ),
+        ("Cast.enable", json!({})),
+        ("Cast.setSinkToUse", json!({"sinkName": "x"})),
+        ("Cast.startTabMirroring", json!({"sinkName": "x"})),
+    ] {
+        let r = c.call(method, params.clone()).await;
+        assert!(refused(&r), "{method}: {r}");
+        let r = c.call_in(Some(&session), method, params).await;
+        assert!(refused(&r), "{method} (page session): {r}");
+    }
+
+    // The binding was never installed, so page script has no channel to the browser.
+    let r = c.eval(&session, "typeof window.cdpEscape").await;
+    assert_eq!(r["result"]["result"]["value"], "undefined", "{r}");
+
+    // The earlier host protections still hold on the same relay.
+    let r = c
+        .call(
+            "Target.createBrowserContext",
+            json!({"proxyServer": "direct://"}),
+        )
+        .await;
+    assert!(refused(&r), "{r}");
+    let r = c
+        .call_in(
+            Some(&session),
+            "Page.navigate",
+            json!({"url": "file:///etc/hostname"}),
+        )
+        .await;
+    assert!(refused(&r), "{r}");
+
+    // Ordinary clients keep working.
+    let r = c.eval(&session, "6 * 7").await;
+    assert_eq!(r["result"]["result"]["value"], 42, "{r}");
+    let r = c
+        .call("Browser.getWindowForTarget", json!({"targetId": target}))
+        .await;
+    assert!(r.get("error").is_none() || !refused(&r), "{r}");
+}
+
 /// Finding 18: downloads land in the per-session directory whatever path the client names,
 /// and the directory goes away with the last relay connection.
 #[tokio::test]

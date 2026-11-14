@@ -29,6 +29,7 @@ time.workspace = true
 sha2.workspace = true
 hex.workspace = true
 url.workspace = true
+nix.workspace = true
 
 [dev-dependencies]
 browserx-pool = { workspace = true, features = ["testing"] }
