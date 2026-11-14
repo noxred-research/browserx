@@ -1,0 +1,35 @@
+# Secret-scan configuration (https://github.com/gitleaks/gitleaks). Run:
+#   gitleaks git . --log-opts="--all --full-history --diff-merges=separate" --config .gitleaks.toml --redact
+#   gitleaks dir . --config .gitleaks.toml --redact
+title = "browserx"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "browserx-lease-token"
+description = "BrowserX session lease token (controller credential, also embedded in CDP relay URLs)"
+regex = '''\bbxt_[A-Za-z0-9_-]{32,}'''
+keywords = ["bxt_"]
+
+[[rules]]
+id = "browserx-api-key"
+description = "BrowserX API key"
+regex = '''\bbxk_[A-Za-z0-9_-]{32,}'''
+keywords = ["bxk_"]
+
+[[rules]]
+id = "browserx-snapshot-key"
+description = "BrowserX snapshot key file body"
+regex = '''(?m)^key=[A-Za-z0-9+/]{43}=$'''
+keywords = ["browserx-snapshot-key", "key="]
+
+[allowlist]
+description = "Reviewed synthetic values only; fixture directories are scanned normally"
+regexTarget = "secret"
+regexes = [
+  # Documentation placeholders: an obvious word where the credential goes.
+  '''^bx[kt]_(?:EXAMPLE|PLACEHOLDER|YOUR)[A-Za-z0-9_-]*$''',
+  '''^bx[kt]_x{32,}$''',
+  '''^bx[kt]_0{32,}$''',
+]

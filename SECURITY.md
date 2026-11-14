@@ -1,0 +1,128 @@
+# Security policy
+
+We take the security of BrowserX and of the people who run it seriously. This page says which versions are supported, how to report a vulnerability, what you can expect from us, and what is in and out of scope.
+
+> **Intended use.** BrowserX is AI/LLM-native browser infrastructure for authorized security research. It operates browsers and network egress that you own or are permitted to operate, and AI agents may drive it through the MCP server. Use it only on systems and services you own or are authorized to test or automate. See [Responsible use](#responsible-use).
+
+## Supported versions
+
+| Version | Supported |
+| --- | --- |
+| 0.1.x | Yes |
+| Earlier than 0.1.0 | No |
+
+BrowserX is pre-1.0. Only the latest 0.1.x release (and the `main` branch) receives security fixes. The distribution is the source repository and tagged source releases. No binaries, container images, hosted service or crates.io packages are published, so there are no other artifacts to patch. The Dockerfile and Compose file in [`docker/`](docker) are for development and evaluation: do not expose a container started from them to a network you do not control. Every container image they and the CI scripts use is pinned by digest.
+
+### Automated security checks
+
+The [security workflow](.github/workflows/security.yml) checks locked dependencies against current Rust advisories, scans all fetched Git history for secrets and audits workflow configuration on main-branch pushes, weekly and on manual dispatch. On pull requests it rejects added dependencies with known high-severity vulnerabilities, and on `main` it runs the OpenSSF Scorecard. [CodeQL](.github/workflows/codeql.yml) analyzes Rust and GitHub Actions on authorized pull requests, main-branch pushes, weekly and on manual dispatch. Dependency review, Scorecard and CodeQL publish results only while the repository is public. Maintainers update dependencies and container base images by hand; the advisory check above reports vulnerable locked dependencies. These checks run only for code owners (see [`.github/CODEOWNERS`](.github/CODEOWNERS)); they reduce risk and do not replace review.
+
+## Reporting a vulnerability
+
+**Do not open a public issue, pull request or discussion for a suspected vulnerability.** Report it privately through GitHub private vulnerability reporting for `noxred-research/browserx`:
+
+1. Open <https://github.com/noxred-research/browserx/security/advisories/new>, or go to the repository's **Security** tab and choose **Report a vulnerability**.
+2. Describe the affected component (HTTP API, CDP relay, MCP server, scheduler, egress forwarder, snapshot storage, runtime, CLI) and the version or commit, the impact, and steps or a proof of concept that reproduce the problem. A minimal reproduction against a local worker is ideal.
+3. Do not include live credentials, real personal data, working lease tokens, snapshot key files or captured third-party content in the report.
+
+If the private reporting option is not offered on the repository, open a public issue that asks for a private channel and contains no technical details.
+
+## What to expect
+
+These are commitments for good-faith reports of issues in scope. Times are in business days.
+
+| Step | Target |
+| --- | --- |
+| Acknowledge receipt | within 3 days |
+| Initial assessment: confirmed, needs more information, or not a vulnerability | within 10 days |
+| Status updates while the report is open | at least every 14 days |
+| Fix or mitigation, and a coordinated disclosure date | within 90 days of the initial assessment; sooner for actively exploited issues |
+
+We will keep you informed, agree on a disclosure date with you, and credit you in the published advisory unless you ask to remain anonymous. This project does not run a bug bounty. If we cannot meet a target we will tell you why.
+
+## Safe harbor
+
+We consider security research carried out in good faith under this policy to be authorized, and we will not pursue or support legal action against you for it. Good faith means that you:
+
+- test only against your own deployment of BrowserX, never against someone else's systems or data;
+- make a reasonable effort to avoid privacy violations, data destruction and interruption or degradation of services;
+- access only as much data as needed to demonstrate the issue, and stop and report if you encounter personal data or credentials;
+- give us a reasonable time to fix the issue before you disclose it, and do not disclose it publicly until we have agreed a date or the 90-day target has passed without a response;
+- do not use social engineering, physical attacks, denial of service or spam.
+
+This safe harbor covers the BrowserX project only. It does not authorize testing of upstream proxies, of third-party sites that a deployment's browsers visit, of the services of GitHub or other platforms, or of anyone else's deployment; those have their own terms. If you are unsure whether an activity is covered, ask first, privately.
+
+## Scope
+
+**In scope:** code in this repository, its build and CI configuration, and the deployment files under `docker/`. Findings that bypass a control described below are in scope even when they need a particular configuration. Examples:
+
+- **Authentication and authorization.**
+  - A way to call a `/v1` route, attach to the CDP relay or release a session without a valid API key and, where required, lease token.
+  - Acting on another owner's session: reading, attaching to, renewing, handing off, snapshotting or releasing it, or listing it.
+  - A lease token that keeps working after handoff or release, or relay connections that survive the generation change.
+  - Bypassing the generation fencing so that a stale controller can act on a lease that moved on.
+- **Relay scoping.** Under shared-browser isolation, any way for a session to reach another session's browser context, targets or storage, or to run a command the scoped relay refuses (`Target.createBrowserContext`, `Browser.close`, `SystemInfo.*` and so on). Context isolation is documented as not being a hostile multi-tenant boundary, so reports must show a breach of the *documented* filtering, not a browser-level escape.
+- **Egress controls.** A way to make the forwarder dial a private, loopback, link-local, carrier-grade NAT, cloud metadata or other address its policy refuses, including through DNS rebinding, redirects, alternative IP spellings or IPv6 embeddings; or a way to reach the network from a browser without going through the forwarder.
+- **Secret handling.** Leakage of API keys, lease tokens, proxy passwords or snapshot key material into logs, metrics, error bodies, API responses, command lines or environment of the browser beyond what the documentation states.
+- **Snapshot and profile storage.** Reading or forging snapshots without the key, swapping sealed snapshots between profiles or versions, files created with wider permissions than documented, profile directories shared between two browsers, or erasure that leaves data behind.
+- **MCP server and AI tools** (`browserx mcp`, crate `browserx-mcp`).
+  - Listing or calling a tool whose capability the operator did not enable; a `confirm: true` requirement that can be skipped; a browsing or interaction tool that works on a session the MCP server did not create or adopt.
+  - Navigation or interaction outside `browse.allowed_origins` or the engagement window, including through redirects, alternative URL spellings, non-`http(s)` schemes, new tabs or `about:` pages; stale element references that act on a different element.
+  - Access to the streamable HTTP listener without the bearer token, a non-constant-time token comparison, a missing or bypassable `Origin` check, or binding beyond loopback without an explicit operator choice.
+  - Disclosure of lease tokens, `cdp_url`, API keys, the `[ai]` key or proxy credentials to the model, in tool results, resources, logs or the audit log; page-derived text returned without the `<untrusted_page_content>` wrapper.
+  - A gap in the audit log: a `tools/call` that is not recorded, a chain that `browserx mcp audit verify` accepts after modification, or an audit file created with wider permissions than `0600`.
+  - Unbounded messages, output, concurrency, tabs or network-log memory, and bypass of per-tool rate limits.
+  - Any path that lets model output change a lease, a recovery decision, an egress decision or the relay policy: those are deterministic and must not depend on a model.
+- **Resource limits.** Bypassing owner quotas, the admission queue bounds, message-size limits or forwarder limits so that one client exhausts the worker.
+- **Supply chain.** Weaknesses in the build, container, workflow or dependency configuration.
+
+**Out of scope:**
+
+- vulnerabilities in third-party dependencies, including Chromium, that have no BrowserX-specific exploit path (report those upstream; dependency advisories are checked in CI);
+- findings that require an operator to deliberately grant a credential, a token, filesystem access to `state_dir` or a network position to an attacker;
+- what a target site does with traffic from browsers a worker runs, and the behavior of upstream proxies;
+- malicious behavior of a client that holds a valid lease on a **dedicated** browser: it controls a real browser by design;
+- plaintext transport on listeners an operator exposes without TLS termination, which the documentation tells operators to avoid;
+- denial of service by volume against a deployment that does not use the limits the documentation tells operators to configure;
+- what a model says or concludes: an advisory tool (`summarize_page`, `extract_data`, `diagnose`) that returns wrong, incomplete or manipulated text is a quality issue, not a vulnerability, unless it also bypasses a control listed above;
+- prompt injection that only changes the model's wording or choices inside the scope, capabilities and limits the operator configured;
+- the behavior and data handling of the third-party model endpoint an operator configures under `[ai]`;
+- the development defaults of the files in `docker/`, except that the shipped configuration must keep Chromium's sandbox on;
+- reports from automated scanners without a demonstrated impact, and social engineering of maintainers;
+- abuse of BrowserX by third parties against systems you operate. We cannot act on deployments we do not run; report that activity to the operator or hosting provider concerned.
+
+## What BrowserX handles
+
+Knowing what a deployment holds helps you judge impact and protect it.
+
+- **API keys (`bxk_...`)** are stored as SHA-256 digests only, in the configuration, and are shown once at creation.
+- **Lease tokens (`bxt_...`)** are stored as SHA-256 digests in the lease registry and returned once. A token also appears in the `cdp_url` of its session, so treat that URL as a secret and keep request paths of `/cdp/` out of proxy logs. BrowserX itself never logs them.
+- **Snapshots** hold session cookies and `localStorage`. They are encrypted with AES-256-GCM before they reach disk; the key lives in a separate key file (mode `0600`). Anyone who has both can read them.
+- **Profile directories** are ordinary Chromium profiles, unencrypted, readable by the worker's user. They contain cookies, storage and caches.
+- **Proxy passwords** of a session are held in the lease registry (needed to recover the session) and are write-only through the API.
+- **MCP server configuration** names the worker URL and files holding the worker API key and the optional `[ai]` key; keys are read from files and never inline. The optional HTTP listener stores only the SHA-256 digest of its bearer token.
+- **The MCP audit log** records every tool call with sensitive arguments redacted, the operator and the authorization note, in a hash-chained JSONL file with mode `0600`. It can still contain URLs and page text excerpts, so protect it like a log of your engagement.
+- **Browsers** execute whatever pages their clients open, with the privileges of the worker's user. Isolate workers accordingly. A browser does not inherit the worker's environment (only an allow-list and the launch profile's `env`).
+- **Secrets read from the environment** (`BROWSERX_DATABASE_PASSWORD`, `BROWSERX_OBJECT_STORE_*`, `BROWSERX_*_PASSWORD`) stay in the worker's own environment: Rust 2024 makes `remove_var` unsafe and the project forbids `unsafe`, so the worker cannot scrub them. What protects them is that the worker marks itself non-dumpable at startup (`prctl(PR_SET_DUMPABLE, 0)`): other processes of the same user cannot read `/proc/<worker>/environ` or its memory, and cannot `ptrace`-attach to it. Browsers do not inherit the environment at all. The cost is that a same-user `gdb -p` or `strace -p` on the worker is refused and the worker writes no core dump; debug it as root, or start it under the debugger. The setting does not protect against root or a process with `CAP_SYS_PTRACE`, and it is not a substitute for the `*_file` form, which leaves nothing in the environment: use that.
+
+## Deployment requirements
+
+- **Chromium's sandbox is on by default.** `--no-sandbox` is an explicit opt-in in a launch profile and **removes the boundary between a renderer bug and the whole worker** (snapshot key, lease database, every tenant's profiles). The container configuration in [`docker/`](docker) does not use it. Container runtimes usually block the user namespaces the sandbox needs; [`docker/seccomp-chromium.json`](docker/seccomp-chromium.json) is the default Docker profile (moby/profiles `seccomp/default.json` at commit `9ee3204`) with `clone`, `unshare`, `setns` and `chroot` allowed without the `CAP_SYS_ADMIN` / `CAP_SYS_CHROOT` condition, and Compose applies it. With `docker run`, pass `--security-opt seccomp=docker/seccomp-chromium.json`. Only if your runtime cannot allow user namespaces, add `--no-sandbox` knowingly, run a single trust domain per worker and browse only content you trust.
+- **The worker host or container must be single-tenant.** A browser's DevTools port and each session's egress forwarder listen on `127.0.0.1` without authentication and trust any local user. Run no other untrusted uid on the host, and give each worker its own container or network namespace.
+- **Prefer `*_file` for secrets** (see above).
+
+## Maintainer rules
+
+- **Never approve a workflow run from a fork without reading that pull request's diff of `.github/` first.** The `authorize` gate lives in a workflow file that a pull request can edit, so approval of a fork run executes whatever that diff says on the project's runners. Approve only after you have read every changed workflow, action reference and CI script.
+
+See [isolation and security](docs/design/isolation-and-security.md) for the threat model.
+
+## Responsible use
+
+BrowserX gives automation clients, including AI agents, real browsers and network egress. Use it only where you have the right to: your own sites and test environments, services whose owners and terms permit automation, and upstream proxies you are entitled to use. Do not use it to attack or overload third parties, to access systems or data you are not authorized to access, to evade a site's protections, or for anything unlawful where you operate. This is the project's intended-use policy and a condition of support and community participation; the [AGPL-3.0-only](LICENSE) license itself is unchanged.
+
+The project enforces parts of this in code: the egress forwarder refuses non-public destinations by default, quotas and queues bound what one owner can consume, the relay scopes shared sessions, and the MCP server refuses navigation outside the operator's scope and audits every tool call. These controls reduce harm; they do not verify that you are authorized. Misuse of BrowserX is not covered by this policy, is not covered by the safe harbor above, and is your responsibility.
+
+## Disclosure
+
+After a fix is released, the advisory is published through GitHub Security Advisories with credit to the reporter unless the reporter asks to remain anonymous.

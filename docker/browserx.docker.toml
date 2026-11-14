@@ -1,0 +1,33 @@
+# Container configuration. Mount your own file over /etc/browserx/browserx.toml
+# to change it; add API keys via `browserx keys new <name>`.
+#
+# The listeners bind all interfaces INSIDE the container; compose publishes them
+# on the host loopback only. Put a TLS-terminating proxy in front for remote use.
+
+[server]
+listen = "0.0.0.0:7690"
+ops_listen = "0.0.0.0:7691"
+public_base_url = "http://127.0.0.1:7690"
+
+[[auth.api_keys]]
+name = "dev"
+# Replace with the output of `browserx keys new dev`.
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[storage]
+state_dir = "/var/lib/browserx/state"
+# Outside state_dir: browsers run as the worker's uid.
+snapshot_key_file = "/var/lib/browserx/keys/snapshot.key"
+
+[runtime.launch_profiles.default]
+headless = true
+# Chromium's sandbox stays ON. It needs user namespaces, which the default
+# container seccomp profile blocks: start the container with the profile in
+# docker/seccomp-chromium.json (compose.yaml already does; with `docker run`
+# add `--security-opt seccomp=docker/seccomp-chromium.json`).
+#
+# Adding "--no-sandbox" to args is an explicit opt-in. The browser then runs
+# with the full privileges of the worker (snapshot key, lease database and every
+# profile) and one renderer bug compromises all of it: see SECURITY.md.
+# --disable-dev-shm-usage avoids the small default /dev/shm; compose also sets shm_size.
+args = ["--disable-gpu", "--disable-dev-shm-usage"]

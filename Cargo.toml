@@ -1,0 +1,97 @@
+[workspace]
+resolver = "2"
+members = [
+    # Shared vocabulary: identifiers, lease records, session specs, errors, service traits
+    "crates/browserx-core",
+    # Bounded Chrome DevTools Protocol client
+    "crates/browserx-cdp",
+    # Chromium process supervision, launch profiles, profile directories, state snapshots
+    "crates/browserx-runtime",
+    # Per-session local egress forwarder (upstream HTTP CONNECT / SOCKS5 proxies)
+    "crates/browserx-egress",
+    # Lease registry and snapshot storage (memory and SQLite)
+    "crates/browserx-store",
+    # Scheduler: admission queue, allocation, renewal, expiry, recovery, handoff
+    "crates/browserx-pool",
+    # HTTP API, authenticated CDP relay, metrics
+    "crates/browserx-server",
+    # Model Context Protocol server: monitoring, session control and scoped browsing for AI agents
+    "crates/browserx-mcp",
+    # The `browserx` binary
+    "crates/browserx",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/noxred-research/browserx"
+homepage = "https://browserx.dev"
+rust-version = "1.97"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+dbg_macro = "deny"
+todo = "deny"
+await_holding_lock = "deny"
+
+[workspace.dependencies]
+browserx-core = { path = "crates/browserx-core" }
+browserx-cdp = { path = "crates/browserx-cdp" }
+browserx-runtime = { path = "crates/browserx-runtime" }
+browserx-egress = { path = "crates/browserx-egress" }
+browserx-store = { path = "crates/browserx-store" }
+browserx-pool = { path = "crates/browserx-pool" }
+browserx-server = { path = "crates/browserx-server" }
+browserx-mcp = { path = "crates/browserx-mcp" }
+
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt", "time"] }
+futures-util = "0.3"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.2"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+rand = "0.10"
+sha2 = "0.11"
+hex = "0.4"
+base64 = "0.23"
+aes-gcm = "0.11"
+zeroize = "1"
+tokio-tungstenite = "0.30"
+url = "2"
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = "3"
+nix = { version = "0.31", features = ["signal", "process"] }
+tokio-postgres = "0.7"
+deadpool-postgres = "0.14"
+tokio-postgres-rustls = "0.13"
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust", "rustls-tls"] }
+redis = { version = "1", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "tls-rustls-webpki-roots"] }
+lapin = { version = "4", default-features = false, features = ["rustls", "tokio"] }
+rskafka = { version = "0.6", default-features = false, features = ["transport-tls", "compression-lz4"] }
+hmac = "0.13"
+webpki-roots = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1

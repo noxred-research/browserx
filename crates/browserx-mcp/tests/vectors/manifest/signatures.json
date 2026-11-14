@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "description": "Detached-signature vectors. The signature line is `key_id:hex(HMAC-SHA256(key, domain || content))` with the key below; domains are `browserx/engagement-manifest/v1` + NUL for manifests and `browserx/scope-grant/v1` + NUL for grants. The vectors were produced with an independent HMAC implementation.",
+  "key_id": "op",
+  "key_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+  "cases": [
+    {
+      "id": "manifest-valid",
+      "kind": "manifest",
+      "content": "[engagement]\nid = \"eng-vector\"\noperator = \"alice\"\nauthorization_note = \"ticket 42\"\nnot_before = \"2026-01-01T00:00:00Z\"\nnot_after = \"2026-12-31T00:00:00Z\"\n\n[[scope]]\nhost = \"app.example.test\"\nmode = \"attack\"\n\n[[protected]]\npattern = \"POST */logout\"\nmode = \"blocked\"\n\n[impact]\nlevel = \"probe\"\n",
+      "signature": "op:153065daede871c156d22b068ec00661e709a58b28a48e32ed83cd3b8d6467e7",
+      "valid": true
+    },
+    {
+      "id": "manifest-tampered-not-after",
+      "kind": "manifest",
+      "content": "[engagement]\nid = \"eng-vector\"\noperator = \"alice\"\nauthorization_note = \"ticket 42\"\nnot_before = \"2026-01-01T00:00:00Z\"\nnot_after = \"2099-12-31T00:00:00Z\"\n\n[[scope]]\nhost = \"app.example.test\"\nmode = \"attack\"\n\n[[protected]]\npattern = \"POST */logout\"\nmode = \"blocked\"\n\n[impact]\nlevel = \"probe\"\n",
+      "signature": "op:153065daede871c156d22b068ec00661e709a58b28a48e32ed83cd3b8d6467e7",
+      "valid": false
+    },
+    {
+      "id": "manifest-tampered-trailing-newline",
+      "kind": "manifest",
+      "content": "[engagement]\nid = \"eng-vector\"\noperator = \"alice\"\nauthorization_note = \"ticket 42\"\nnot_before = \"2026-01-01T00:00:00Z\"\nnot_after = \"2026-12-31T00:00:00Z\"\n\n[[scope]]\nhost = \"app.example.test\"\nmode = \"attack\"\n\n[[protected]]\npattern = \"POST */logout\"\nmode = \"blocked\"\n\n[impact]\nlevel = \"probe\"\n\n",
+      "signature": "op:153065daede871c156d22b068ec00661e709a58b28a48e32ed83cd3b8d6467e7",
+      "valid": false
+    },
+    {
+      "id": "manifest-signed-with-the-grant-domain",
+      "kind": "manifest",
+      "content": "[engagement]\nid = \"eng-vector\"\noperator = \"alice\"\nauthorization_note = \"ticket 42\"\nnot_before = \"2026-01-01T00:00:00Z\"\nnot_after = \"2026-12-31T00:00:00Z\"\n\n[[scope]]\nhost = \"app.example.test\"\nmode = \"attack\"\n\n[[protected]]\npattern = \"POST */logout\"\nmode = \"blocked\"\n\n[impact]\nlevel = \"probe\"\n",
+      "signature": "op:93b518d769dc113f80fa1a6d73aca3c8498a8aa16d4759811514fafd63d1ff0e",
+      "valid": false
+    },
+    {
+      "id": "manifest-unknown-key-id",
+      "kind": "manifest",
+      "content": "[engagement]\nid = \"eng-vector\"\noperator = \"alice\"\nauthorization_note = \"ticket 42\"\nnot_before = \"2026-01-01T00:00:00Z\"\nnot_after = \"2026-12-31T00:00:00Z\"\n\n[[scope]]\nhost = \"app.example.test\"\nmode = \"attack\"\n\n[[protected]]\npattern = \"POST */logout\"\nmode = \"blocked\"\n\n[impact]\nlevel = \"probe\"\n",
+      "signature": "other:153065daede871c156d22b068ec00661e709a58b28a48e32ed83cd3b8d6467e7",
+      "valid": false
+    },
+    {
+      "id": "manifest-malformed-signature",
+      "kind": "manifest",
+      "content": "[engagement]\nid = \"eng-vector\"\noperator = \"alice\"\nauthorization_note = \"ticket 42\"\nnot_before = \"2026-01-01T00:00:00Z\"\nnot_after = \"2026-12-31T00:00:00Z\"\n\n[[scope]]\nhost = \"app.example.test\"\nmode = \"attack\"\n\n[[protected]]\npattern = \"POST */logout\"\nmode = \"blocked\"\n\n[impact]\nlevel = \"probe\"\n",
+      "signature": "op:not-hex",
+      "valid": false
+    },
+    {
+      "id": "grant-valid",
+      "kind": "grant",
+      "content": "[grant]\nengagement = \"eng-vector\"\nprincipal = \"*\"\nro_origins = [\"https://docs.example.test\"]\nrw_origins = [\"https://app.example.test\"]\nnot_after = \"2026-12-31T00:00:00Z\"\n\n[budgets]\ncalls = 50\n",
+      "signature": "op:02f6ac4a4ec8a35197a549d9cd0976fc3483ebbfd71219f512d8ca41bd288b19",
+      "valid": true
+    },
+    {
+      "id": "grant-one-byte-flipped",
+      "kind": "grant",
+      "content": "[grant]\nengagement = \"eng-vector\"\nprincipal = \"*\"\nro_origins = [\"https://docs.example.test\"]\nrw_origins = [\"https://app.example.test\"]\nnot_after = \"2026-12-31T00:00:00Z\"\n\n[budgets]\ncalls = 59\n",
+      "signature": "op:02f6ac4a4ec8a35197a549d9cd0976fc3483ebbfd71219f512d8ca41bd288b19",
+      "valid": false
+    },
+    {
+      "id": "grant-signed-with-the-manifest-domain",
+      "kind": "grant",
+      "content": "[grant]\nengagement = \"eng-vector\"\nprincipal = \"*\"\nro_origins = [\"https://docs.example.test\"]\nrw_origins = [\"https://app.example.test\"]\nnot_after = \"2026-12-31T00:00:00Z\"\n\n[budgets]\ncalls = 50\n",
+      "signature": "op:27b6b5243e7ffabbf81fe3fc62a5b64e62d88d4517b108508342bae5404f89f0",
+      "valid": false
+    }
+  ]
+}

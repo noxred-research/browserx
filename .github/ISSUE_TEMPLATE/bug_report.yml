@@ -1,0 +1,99 @@
+name: Bug report
+description: Something does not work as documented
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+
+        **Do not report security vulnerabilities here.** Use private vulnerability reporting, see
+        [SECURITY.md](https://github.com/noxred-research/browserx/blob/main/SECURITY.md). Do not paste API keys, lease tokens
+        (`bxt_...`), CDP URLs, cookies, snapshot key files, real personal data or captured third-party content.
+  - type: input
+    id: version
+    attributes:
+      label: browserx version or commit
+      description: Output of `browserx --version`, or the commit you built.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Session API (create, attach, renew, handoff, release)
+        - Scheduler (admission queue, quotas, expiry)
+        - Recovery (health monitor, relaunch, restore)
+        - Persistence (profile directories, snapshots, key file)
+        - CDP relay (dedicated or shared isolation)
+        - Egress forwarder or upstream proxy
+        - Browser runtime (launch, launch profiles, shutdown)
+        - Metrics, health or readiness endpoints
+        - Command-line client or `browserx doctor`
+        - Deployment (Docker, Compose)
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - From source
+        - Docker or Compose
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you see? Include the full error message and the `outcome` the attach reported, if any.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The exact command line or request JSON, with secrets removed. A loopback page served by a local test server is ideal.
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS and architecture, Rust version if built from source, the Chromium version (`browserx doctor` prints it), the session spec (`persistence`, `isolation`, `recovery`) and the relevant configuration sections.
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Redacted log lines. Run with `RUST_LOG=debug` for more detail. Never paste the CDP relay path; it carries a lease token.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the documentation and existing issues.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
+        - label: I removed credentials, tokens, cookies and third-party content from everything I pasted.
+          required: true

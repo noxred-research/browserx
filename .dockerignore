@@ -1,0 +1,13 @@
+# The image build copies only Cargo manifests, the crates and docker/ files; keep everything
+# else, in particular local state and keys, out of the build context.
+.git
+.github
+target
+.browserx
+.browserx-keys
+**/*.key
+**/*.pem
+**/*.db
+**/*.sqlite
+**/.env
+**/.env.*

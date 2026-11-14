@@ -1,0 +1,1130 @@
+[
+  {
+    "id": "en-delete-account-post-form",
+    "why": "destructive English label on a submit button of a POST form",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Delete account",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/settings",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "fr-supprimer-le-compte",
+    "why": "French destructive label",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Supprimer le compte",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/settings",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "de-konto-loeschen",
+    "why": "German destructive label (umlaut folded)",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Konto löschen",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/settings",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "es-eliminar-cuenta",
+    "why": "Spanish destructive label",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Eliminar cuenta",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/settings",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "tr-hesabi-sil",
+    "why": "Turkish destructive label (dotless i)",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Hesabı sil",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/settings",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "zh-delete",
+    "why": "Chinese destructive label, matched as a substring",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "删除账户",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/settings",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "ru-delete",
+    "why": "Russian destructive label",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Удалить аккаунт",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/settings",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "cancel-label-posting-to-delete-path",
+    "why": "a benign label cannot hide a POST to a delete path",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Cancel",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/account/delete",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "save-label-posting-to-delete-path",
+    "why": "a benign label cannot hide a POST to a delete path",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Save",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/account/delete",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "save-label-posting-to-settings",
+    "why": "a benign label on an ordinary POST is a plain state change",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Save",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/settings",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "submit_state_change"
+  },
+  {
+    "id": "formaction-override-to-delete",
+    "why": "formaction on the button overrides the form action",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Save",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/settings",
+      "formaction": "https://app.example.test/delete",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "post-to-external-origin",
+    "why": "a POST whose action leaves the scope sends data out",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Save",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://collector.example.net/in",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "external_communication"
+  },
+  {
+    "id": "post-to-checkout-path",
+    "why": "a POST to a checkout path is a payment",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Continue",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/checkout",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "payment"
+  },
+  {
+    "id": "buy-now-in-post-form",
+    "why": "payment label on a submit button",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Buy now",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/cart",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "payment"
+  },
+  {
+    "id": "send-message-in-post-form",
+    "why": "communication label on a submit button",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Send message",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/messages",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "external_communication"
+  },
+  {
+    "id": "external-origin-link",
+    "why": "a link outside the scope",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "link",
+      "tag": "a",
+      "name": "Partner",
+      "href": "https://partner.example.net/",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "navigate_out_of_scope"
+  },
+  {
+    "id": "in-scope-link",
+    "why": "a benign link inside the scope",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "link",
+      "tag": "a",
+      "name": "Docs",
+      "href": "https://app.example.test/docs",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "navigate_in_scope"
+  },
+  {
+    "id": "mailto-link",
+    "why": "mailto opens a message",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "link",
+      "tag": "a",
+      "name": "Contact",
+      "href": "mailto:team@example.test",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "external_communication"
+  },
+  {
+    "id": "tel-link",
+    "why": "tel starts a call",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "link",
+      "tag": "a",
+      "name": "Call",
+      "href": "tel:+15550100",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "external_communication"
+  },
+  {
+    "id": "javascript-href",
+    "why": "a javascript: link has an unknown effect",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "link",
+      "tag": "a",
+      "name": "Go",
+      "href": "javascript:void(0)",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "unknown"
+  },
+  {
+    "id": "logout-link-get",
+    "why": "GET with side effects: the path ends the session",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "link",
+      "tag": "a",
+      "name": "Leave",
+      "href": "https://app.example.test/logout",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "delete-link-label-benign",
+    "why": "the path decides, not the label",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "link",
+      "tag": "a",
+      "name": "Details",
+      "href": "https://app.example.test/account/delete",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "destructive-label-on-plain-link",
+    "why": "a destructive word on an ordinary link does not make it a state change",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "link",
+      "tag": "a",
+      "name": "Delete policy",
+      "href": "https://app.example.test/help/retention",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "navigate_in_scope"
+  },
+  {
+    "id": "fragment-link-with-destructive-label",
+    "why": "a link into the current page is read like a script-driven control",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "link",
+      "tag": "a",
+      "name": "Delete",
+      "href": "https://app.example.test/settings#",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "download-link",
+    "why": "download attribute",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "link",
+      "tag": "a",
+      "name": "Report",
+      "href": "https://app.example.test/report.csv",
+      "download": true,
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "file_transfer"
+  },
+  {
+    "id": "archive-link",
+    "why": "archive extension",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "link",
+      "tag": "a",
+      "name": "Get the tool",
+      "href": "https://app.example.test/tool.zip",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "file_transfer"
+  },
+  {
+    "id": "file-input-click",
+    "why": "file input",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "tag": "input",
+      "input_type": "file",
+      "name": "Attachment",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/upload",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "file_transfer"
+  },
+  {
+    "id": "file-input-type",
+    "why": "file input",
+    "intent": {
+      "kind": "type_text",
+      "submit": false
+    },
+    "features": {
+      "tag": "input",
+      "input_type": "file",
+      "name": "Attachment",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "file_transfer"
+  },
+  {
+    "id": "login-form-password-field",
+    "why": "password input",
+    "intent": {
+      "kind": "type_text",
+      "submit": false
+    },
+    "features": {
+      "role": "textbox",
+      "tag": "input",
+      "input_type": "password",
+      "name": "Password",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/login",
+      "form_has_password": true,
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "credential_entry"
+  },
+  {
+    "id": "login-form-username-field",
+    "why": "username field of a form with a password input",
+    "intent": {
+      "kind": "type_text",
+      "submit": false
+    },
+    "features": {
+      "role": "textbox",
+      "tag": "input",
+      "input_type": "text",
+      "autocomplete": "username",
+      "name": "Email",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/login",
+      "form_has_password": true,
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "credential_entry"
+  },
+  {
+    "id": "login-submit-button",
+    "why": "sign-in submit",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Sign in",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/session",
+      "form_has_password": true,
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "credential_entry"
+  },
+  {
+    "id": "press-enter-in-login-form",
+    "why": "Enter submits the login form",
+    "intent": {
+      "kind": "press_enter"
+    },
+    "features": {
+      "role": "textbox",
+      "tag": "input",
+      "input_type": "text",
+      "name": "Email",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/login",
+      "form_has_password": true,
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "credential_entry"
+  },
+  {
+    "id": "one-time-code-field",
+    "why": "autocomplete one-time-code",
+    "intent": {
+      "kind": "type_text",
+      "submit": false
+    },
+    "features": {
+      "role": "textbox",
+      "tag": "input",
+      "input_type": "text",
+      "autocomplete": "one-time-code",
+      "name": "Code",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "credential_entry"
+  },
+  {
+    "id": "payment-card-number-field",
+    "why": "autocomplete cc-number",
+    "intent": {
+      "kind": "type_text",
+      "submit": false
+    },
+    "features": {
+      "role": "textbox",
+      "tag": "input",
+      "input_type": "text",
+      "autocomplete": "cc-number",
+      "name": "Card",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/pay",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "payment"
+  },
+  {
+    "id": "card-number-by-element-name",
+    "why": "card words in the id or name attribute",
+    "intent": {
+      "kind": "type_text",
+      "submit": false
+    },
+    "features": {
+      "role": "textbox",
+      "tag": "input",
+      "input_type": "text",
+      "element_id_or_name": "cardNumber",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "payment"
+  },
+  {
+    "id": "get-search-form-submit-button",
+    "why": "GET form to an in-scope action navigates",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Find",
+      "in_form": true,
+      "form_method": "get",
+      "form_action": "https://app.example.test/search",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "navigate_in_scope"
+  },
+  {
+    "id": "type-submit-in-search-form",
+    "why": "typing then Enter in a GET search form navigates",
+    "intent": {
+      "kind": "type_text",
+      "submit": true
+    },
+    "features": {
+      "role": "searchbox",
+      "tag": "input",
+      "input_type": "search",
+      "name": "Search",
+      "in_form": true,
+      "form_method": "get",
+      "form_action": "https://app.example.test/search",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "navigate_in_scope"
+  },
+  {
+    "id": "type-submit-in-post-form",
+    "why": "typing then Enter in a POST form changes state",
+    "intent": {
+      "kind": "type_text",
+      "submit": true
+    },
+    "features": {
+      "role": "textbox",
+      "tag": "input",
+      "input_type": "text",
+      "name": "Note",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/notes",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "submit_state_change"
+  },
+  {
+    "id": "get-form-to-external-origin",
+    "why": "GET form whose action leaves the scope",
+    "intent": {
+      "kind": "press_enter"
+    },
+    "features": {
+      "role": "searchbox",
+      "tag": "input",
+      "input_type": "search",
+      "name": "Search",
+      "in_form": true,
+      "form_method": "get",
+      "form_action": "https://search.example.net/",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "navigate_out_of_scope"
+  },
+  {
+    "id": "type-text-no-submit",
+    "why": "typing into a text field",
+    "intent": {
+      "kind": "type_text",
+      "submit": false
+    },
+    "features": {
+      "role": "textbox",
+      "tag": "input",
+      "input_type": "text",
+      "name": "Note",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/notes",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "form_edit"
+  },
+  {
+    "id": "checkbox-click",
+    "why": "toggling a checkbox",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "checkbox",
+      "tag": "input",
+      "input_type": "checkbox",
+      "name": "Delete my data when I leave",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "form_edit"
+  },
+  {
+    "id": "select-option",
+    "why": "choosing an option",
+    "intent": {
+      "kind": "select_option"
+    },
+    "features": {
+      "role": "combobox",
+      "tag": "select",
+      "name": "Color",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "form_edit"
+  },
+  {
+    "id": "disclosure-button",
+    "why": "expanding a section",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "button",
+      "name": "Details",
+      "aria_expanded": false,
+      "aria_controls": true,
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "read"
+  },
+  {
+    "id": "menu-button-with-popup",
+    "why": "a menu button",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "button",
+      "name": "More",
+      "aria_haspopup": true,
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "read"
+  },
+  {
+    "id": "tab-click",
+    "why": "switching a tab",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "tab",
+      "tag": "div",
+      "name": "Billing",
+      "aria_controls": true,
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "read"
+  },
+  {
+    "id": "plain-js-button-benign-label",
+    "why": "a script button with no evidence has an unknown effect",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "button",
+      "name": "Continue",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "unknown"
+  },
+  {
+    "id": "plain-js-button-delete-label",
+    "why": "a script button labelled with a destructive verb",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "button",
+      "name": "Delete",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "plain-js-button-supprimer",
+    "why": "a script button labelled with a French destructive verb",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "button",
+      "name": "Supprimer",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "plain-js-button-signout",
+    "why": "sign out ends the session",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "button",
+      "name": "Sign out",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "plain-js-button-share",
+    "why": "a script button that shares",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "button",
+      "name": "Share",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "external_communication"
+  },
+  {
+    "id": "press-enter-on-body-like-element",
+    "why": "Enter on something that is neither a field nor an actuator",
+    "intent": {
+      "kind": "press_enter"
+    },
+    "features": {
+      "tag": "div",
+      "name": "Panel",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "read"
+  },
+  {
+    "id": "press-enter-in-field-without-form",
+    "why": "Enter in a field with no form may send",
+    "intent": {
+      "kind": "press_enter"
+    },
+    "features": {
+      "role": "textbox",
+      "tag": "input",
+      "input_type": "text",
+      "name": "Message",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "unknown"
+  },
+  {
+    "id": "embedded-frame",
+    "why": "controls inside embedded frames are not inspected",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "tag": "iframe",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "unknown"
+  },
+  {
+    "id": "get-form-formaction-delete-label",
+    "why": "formaction makes the label count in a GET form",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Delete",
+      "in_form": true,
+      "form_method": "get",
+      "form_action": "https://app.example.test/search",
+      "formaction": "https://app.example.test/x",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "destructive"
+  },
+  {
+    "id": "get-form-delete-label-without-formaction",
+    "why": "label alone does not raise a GET form submit",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Delete",
+      "in_form": true,
+      "form_method": "get",
+      "form_action": "https://app.example.test/search",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "navigate_in_scope"
+  },
+  {
+    "id": "form-with-file-input-posts",
+    "why": "a POST that uploads a file",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "button",
+      "tag": "button",
+      "input_type": "submit",
+      "name": "Save",
+      "in_form": true,
+      "form_method": "post",
+      "form_action": "https://app.example.test/profile",
+      "form_has_file_input": true,
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "file_transfer"
+  },
+  {
+    "id": "sign-in-link-in-scope",
+    "why": "a login link is a navigation",
+    "intent": {
+      "kind": "click"
+    },
+    "features": {
+      "role": "link",
+      "tag": "a",
+      "name": "Sign in",
+      "href": "https://app.example.test/login",
+      "page_url": "https://app.example.test/settings"
+    },
+    "rw_origins": [
+      "https://app.example.test"
+    ],
+    "expect_class": "navigate_in_scope"
+  }
+]

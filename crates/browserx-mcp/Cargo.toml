@@ -1,0 +1,52 @@
+[package]
+name = "browserx-mcp"
+description = "Model Context Protocol server: monitoring, session control and scoped browsing for AI agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+browserx-core.workspace = true
+browserx-cdp.workspace = true
+aes-gcm.workspace = true
+axum.workspace = true
+base64.workspace = true
+clap.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+url.workspace = true
+rand.workspace = true
+redis.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+lapin.workspace = true
+rskafka.workspace = true
+hmac.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+browserx-egress.workspace = true
+browserx-pool = { workspace = true, features = ["testing"] }
+browserx-runtime.workspace = true
+browserx-server.workspace = true
+browserx-store.workspace = true
+nix.workspace = true
+tempfile.workspace = true
+
+[features]
+# Test-only: lets an evaluation switch one enforcement layer off. Never enabled in releases.
+fault-injection = []
+
+[lints]
+workspace = true

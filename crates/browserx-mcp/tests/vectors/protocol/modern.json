@@ -1,0 +1,510 @@
+{
+  "version": 1,
+  "description": "Protocol conformance vectors, revision 2026-07-28 (stateless requests, per-request _meta, header validation).",
+  "cases": [
+    {
+      "id": "modern-discover",
+      "description": "server/discover lists the versions and capabilities and is cacheable",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "server/discover"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": 200,
+        "result": {
+          "resultType": "complete",
+          "cacheScope": "public",
+          "ttlMs": 3600000,
+          "supportedVersions": [
+            "2026-07-28",
+            "2025-06-18",
+            "2025-03-26"
+          ],
+          "serverInfo": {
+            "name": "browserx-mcp"
+          }
+        }
+      }
+    },
+    {
+      "id": "modern-ping",
+      "description": "ping needs the version and method headers",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "ping"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": 200,
+        "result": {
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "id": "modern-tools-list",
+      "description": "tools/list is cacheable, deterministic and carries schemas and annotations",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/list"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": 200,
+        "result": {
+          "resultType": "complete",
+          "cacheScope": "public"
+        },
+        "tools_sorted": true,
+        "tools_have": [
+          "name",
+          "title",
+          "description",
+          "inputSchema",
+          "outputSchema",
+          "annotations"
+        ],
+        "no_header_mirrors": true
+      }
+    },
+    {
+      "id": "modern-validation-error-is-a-tool-result",
+      "description": "bad arguments are an isError result in the modern era too",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "explain_error"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "explain_error",
+          "arguments": {
+            "code": 5
+          },
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": 200,
+        "result": {
+          "isError": true,
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "id": "modern-structured-content-matches-the-output-schema",
+      "description": "a successful result has structuredContent that validates against the tool's outputSchema and a text copy",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "capabilities"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "capabilities",
+          "arguments": {},
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": 200,
+        "result": {
+          "isError": false
+        },
+        "structured_matches_output_schema": "capabilities",
+        "text_copy": true
+      }
+    },
+    {
+      "id": "modern-trace-context-is-accepted",
+      "description": "a W3C traceparent in _meta is accepted",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "ping"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            },
+            "traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            "tracestate": "v=1"
+          }
+        }
+      },
+      "expect": {
+        "status": 200,
+        "result": {
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "id": "modern-missing-protocol-header",
+      "description": "a modern request without MCP-Protocol-Version is a header mismatch",
+      "headers": {
+        "Mcp-Method": "ping"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": 400,
+        "error_code": -32020
+      }
+    },
+    {
+      "id": "modern-protocol-header-mismatch",
+      "description": "the header must name the version of the body",
+      "headers": {
+        "MCP-Protocol-Version": "2025-06-18",
+        "Mcp-Method": "ping"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": 400,
+        "error_code": -32020
+      }
+    },
+    {
+      "id": "modern-method-header-mismatch",
+      "description": "Mcp-Method must match the method of the body",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/list"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": 400,
+        "error_code": -32020
+      }
+    },
+    {
+      "id": "modern-name-header-mismatch",
+      "description": "Mcp-Name must match params.name for tools/call",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "health"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "capabilities",
+          "arguments": {},
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": 400,
+        "error_code": -32020
+      }
+    },
+    {
+      "id": "modern-header-with-a-body-that-does-not-declare-it",
+      "description": "a header that names the modern revision binds the request: a body without the version in _meta is not served as a legacy call under a different Mcp-Method",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/list"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "explain_error",
+          "arguments": {
+            "code": "stale_generation"
+          }
+        }
+      },
+      "expect": {
+        "status": 400,
+        "error_code": -32020
+      }
+    },
+    {
+      "id": "modern-header-with-a-body-of-the-legacy-era",
+      "description": "the header names 2026-07-28 but the body declares 2025-06-18",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/list"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "explain_error",
+          "arguments": {
+            "code": "stale_generation"
+          },
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2025-06-18"
+          }
+        }
+      },
+      "expect": {
+        "status": 400,
+        "error_code": -32020
+      }
+    },
+    {
+      "id": "modern-missing-name-header",
+      "description": "tools/call without Mcp-Name is a header mismatch",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/call"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "capabilities",
+          "arguments": {},
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": 400,
+        "error_code": -32020
+      }
+    },
+    {
+      "id": "modern-unsupported-version",
+      "description": "an unserved version in _meta is UnsupportedVersion",
+      "headers": {
+        "MCP-Protocol-Version": "2030-01-01",
+        "Mcp-Method": "ping"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2030-01-01",
+            "io.modelcontextprotocol/clientCapabilities": {}
+          }
+        }
+      },
+      "expect": {
+        "status": 400,
+        "error_code": -32022,
+        "error_data": {
+          "requested": "2030-01-01"
+        }
+      }
+    },
+    {
+      "id": "modern-missing-client-capabilities",
+      "description": "a modern request must declare its capabilities",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "ping"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+          }
+        }
+      },
+      "expect": {
+        "status": 400,
+        "error_code": -32602
+      }
+    },
+    {
+      "id": "modern-resource-read-name-header",
+      "description": "resources/read is bound to its uri by Mcp-Name",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "resources/read",
+        "Mcp-Name": "browserx://docs/recovery"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "resources/read",
+        "params": {
+          "uri": "browserx://docs/recovery",
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": 200,
+        "result": {
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "id": "modern-unknown-resource",
+      "description": "a missing resource is an invalid-params error in the modern era",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "resources/read",
+        "Mcp-Name": "browserx://docs/nope"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "resources/read",
+        "params": {
+          "uri": "browserx://docs/nope",
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "vector",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": 200,
+        "error_code": -32602
+      }
+    }
+  ]
+}
