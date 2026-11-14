@@ -33,7 +33,7 @@ BrowserX does not bundle, download or redistribute a browser. It launches a Chro
 
 ## Container base images
 
-The container build in [`docker/`](docker) starts from the public `rust` (build stage) and `debian` (runtime stage) base images and installs distribution packages, among them Chromium, `curl`, `tini` and font packages. Their licenses apply to images you build; Dependabot proposes updates to the base image tags, and the notices of the base image and installed packages are available inside the image under `/usr/share/doc`.
+The container build in [`docker/`](docker) starts from the public `rust` (build stage) and `debian` (runtime stage) base images and installs distribution packages, among them Chromium, `curl`, `tini` and font packages. Their licenses apply to images you build; maintainers update the base image tags by hand, and the notices of the base image and installed packages are available inside the image under `/usr/share/doc`.
 
 ## Documentation and assets
 

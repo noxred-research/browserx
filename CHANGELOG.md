@@ -65,6 +65,7 @@ Review findings on the trust foundation (before its first release):
 ### Changed
 
 - **MCP page-changing tools pass the action gate.** `click`, `type_text`, `press_key`, `select_option` and `evaluate_js` are classified and decided by `[safety] profile`, which defaults to `test_environment`: credential entry, external communication, destructive actions, file transfers and unknown effects need an approval and payments are refused. Configurations without a `[safety.rule_of_two]` section keep working because the missing section means `warn` (recorded, never blocking); `examples/mcp.toml` sets `enforce` for new installs. `tools/list` is now sorted by name and each tool lists `title`, `outputSchema` and annotations.
+- CI runs only on self-hosted runners, and the `workflow-lint` job runs `ci/check-self-hosted-only.py`, which fails any job without the `self-hosted` label and any Dependabot configuration. Dependabot version updates are removed (`.github/dependabot.yml` is deleted): maintainers update dependencies and container base images by hand, and the `security` workflow keeps checking locked dependencies against current advisories.
 
 ### Security
 
