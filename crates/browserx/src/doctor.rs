@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use browserx_core::{BrowserId, BrowserRuntime, LaunchRequest};
 use browserx_runtime::{ChromiumRuntime, RuntimeConfig, discover_chromium};
-use browserx_server::Config;
+use browserx_server::{Config, ping_lease_registry};
 
 struct Report {
     failures: usize,
@@ -28,11 +28,11 @@ impl Report {
 /// Runs the checks; fails when any of them failed.
 pub async fn run(config: Option<&Path>) -> Result<()> {
     let mut report = Report { failures: 0 };
-    let (mut runtime_cfg, storage) = match config {
+    let (mut runtime_cfg, loaded) = match config {
         Some(path) => match Config::load(path) {
             Ok(cfg) => {
                 report.ok("configuration", path.display());
-                (cfg.runtime.clone(), Some(cfg.storage))
+                (cfg.runtime.clone(), Some(cfg))
             }
             Err(e) => {
                 report.fail("configuration", e);
@@ -42,7 +42,8 @@ pub async fn run(config: Option<&Path>) -> Result<()> {
         None => (RuntimeConfig::default().validated()?, None),
     };
 
-    if let Some(storage) = &storage {
+    if let Some(cfg) = &loaded {
+        let storage = &cfg.storage;
         match std::fs::create_dir_all(&storage.state_dir)
             .and_then(|()| tempfile_probe(&storage.state_dir))
         {
@@ -66,6 +67,18 @@ pub async fn run(config: Option<&Path>) -> Result<()> {
                     storage.snapshot_key_file.display()
                 ),
             );
+        }
+        if cfg.database.is_none() && !storage.db_path().exists() {
+            report.ok(
+                "lease registry",
+                "SQLite database is created at the first start",
+            );
+        } else {
+            match tokio::time::timeout(Duration::from_secs(20), ping_lease_registry(cfg)).await {
+                Ok(Ok(())) => report.ok("lease registry", "reachable"),
+                Ok(Err(e)) => report.fail("lease registry", e),
+                Err(_) => report.fail("lease registry", "no answer within 20 s"),
+            }
         }
         runtime_cfg.temp_root = storage.temp_dir();
     }

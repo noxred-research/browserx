@@ -2,8 +2,9 @@ name: security
 
 # Supply-chain checks:
 #   - advisories and secret-history run after main-branch pushes, weekly and on dispatch.
-#     Unlike CI's working-tree scan, gitleaks checks every fetched branch and tag's full
-#     history. No baseline hides historical findings; rotate any exposed credential.
+#     Unlike CI's working-tree scan, gitleaks and the provenance lint check every fetched
+#     branch and tag's full history (commit messages, identities and every blob). No
+#     baseline hides historical findings; rotate any exposed credential.
 #   - dependency-review runs on pull requests and fails when the change adds a dependency with
 #     a known vulnerability of high severity or worse.
 #   - scorecard runs the OpenSSF Scorecard on the default branch, uploads the result to code
@@ -139,6 +140,8 @@ jobs:
           echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
       - name: Scan all fetched history without exposing secret values
         run: gitleaks git --log-opts="--all" --config .gitleaks.toml --redact
+      - name: Provenance lint over all fetched history
+        run: python3 ci/lint-provenance.py --history
 
   workflow-audit:
     runs-on: [self-hosted, noxred]

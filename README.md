@@ -231,3 +231,5 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUC
 ## License
 
 BrowserX is licensed under [AGPL-3.0-only](LICENSE). Maintained by NoxRed Security Research.
+
+**Network use.** If you modify BrowserX and let other people interact with your modified version over a network (for example by offering it as a service), section 13 of the [license](LICENSE) requires you to offer those users the corresponding source code of your version. Running an unmodified build for your own use carries no such obligation. BrowserX itself exposes no source-location endpoint; an operator who modifies it is responsible for providing one. This summary is not legal advice; the license text governs.

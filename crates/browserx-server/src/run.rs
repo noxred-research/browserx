@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use browserx_core::{Error, Result, SystemClock};
+use browserx_core::{Error, Result, SessionId, SystemClock};
 use browserx_core::{LeaseStore, SnapshotStore};
 use browserx_pool::Pool;
 use browserx_runtime::{ChromiumRuntime, discover_chromium};
@@ -58,6 +58,13 @@ fn load_sealer(cfg: &Config) -> Result<Sealer> {
         sealer.add_retired_key_file(retired)?;
     }
     Ok(sealer)
+}
+
+/// Opens the configured lease registry and reads from it once: the check `browserx doctor`
+/// runs, and what `/readyz` repeats while serving.
+pub async fn ping_lease_registry(cfg: &Config) -> Result<()> {
+    let leases = open_lease_store(cfg).await?;
+    leases.get(SessionId::new()).await.map(|_| ())
 }
 
 /// Opens the lease registry the configuration names: SQLite in `state_dir` by default.
@@ -280,5 +287,70 @@ pub async fn shutdown_signal() {
         _ => {
             let _ = tokio::signal::ctrl_c().await;
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use browserx_core::{Generation, ProfileId, SessionId, SnapshotMeta, StateSnapshot};
+    use time::OffsetDateTime;
+
+    use super::*;
+
+    const AUTH: &str = "[[auth.api_keys]]\nname = \"dev\"\nsha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"\n";
+
+    fn snapshot_with(sealer: &Sealer) -> browserx_core::Snapshot {
+        let meta = SnapshotMeta {
+            profile_id: ProfileId::new(),
+            version: 1,
+            session_id: SessionId::new(),
+            generation: Generation(1),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            size: 0,
+            key_id: String::new(),
+        };
+        sealer.seal(meta, &StateSnapshot::default()).unwrap()
+    }
+
+    /// `[storage] retired_snapshot_key_files` reaches the sealer the worker opens snapshots with.
+    #[test]
+    fn configured_retired_key_files_open_old_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let keys = dir.path().join("keys");
+        let (old_key, new_key) = (keys.join("old.key"), keys.join("new.key"));
+        Sealer::generate_key_file(&old_key).unwrap();
+        Sealer::generate_key_file(&new_key).unwrap();
+        let old = Sealer::from_key_file(&old_key).unwrap();
+        let old_id = old.key_id().to_owned();
+        let sealed_before_rotation = snapshot_with(&old);
+
+        let config = |retired: &str| {
+            Config::from_toml(&format!(
+                "{AUTH}[storage]\nstate_dir = {state:?}\nsnapshot_key_file = {new_key:?}\nretired_snapshot_key_files = [{retired}]\n",
+                state = state.display().to_string(),
+                new_key = new_key.display().to_string(),
+            ))
+            .unwrap()
+        };
+
+        let sealer = load_sealer(&config(&format!("{:?}", old_key.display().to_string()))).unwrap();
+        assert!(sealer.open(&sealed_before_rotation).is_ok());
+        let fresh = snapshot_with(&sealer);
+        assert_ne!(fresh.meta.key_id, old_id, "a retired key never seals");
+
+        // Retired key left out of the configuration: refused, and the error names its key id.
+        let err = load_sealer(&config(""))
+            .unwrap()
+            .open(&sealed_before_rotation)
+            .unwrap_err();
+        assert!(matches!(&err, Error::Crypto(m) if *m == format!("unknown key_id {old_id}")));
+
+        // A retired key file that does not exist stops startup instead of being skipped.
+        let missing = keys.join("missing.key");
+        assert!(load_sealer(&config(&format!("{:?}", missing.display().to_string()))).is_err());
+        // The active key listed as retired is a duplicate key id.
+        assert!(load_sealer(&config(&format!("{:?}", new_key.display().to_string()))).is_err());
     }
 }

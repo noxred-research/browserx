@@ -75,7 +75,7 @@ browserx doctor
 browserx doctor --config browserx.toml
 ```
 
-It finds a Chromium executable (`BROWSERX_CHROMIUM_PATH`, then `PATH`), launches the default launch profile, reads the browser version, probes health, creates and disposes a browser context, shuts the browser down with confirmation and prints one line per check (`[ ok ]`, `[warn]`, `[FAIL]`). With `--config` (`-c`), it also validates the file, uses its runtime section (launch profiles, executable, temporary directory) and checks that the state directory is writable and the snapshot key is readable. When the launch fails because of the sandbox, it prints a hint about the `--no-sandbox` launch profile argument. Exit status is non-zero when any check fails.
+It finds a Chromium executable (`BROWSERX_CHROMIUM_PATH`, then `PATH`), launches the default launch profile, reads the browser version, probes health, creates and disposes a browser context, shuts the browser down with confirmation and prints one line per check (`[ ok ]`, `[warn]`, `[FAIL]`). With `--config` (`-c`), it also validates the file, uses its runtime section (launch profiles, executable, temporary directory) and checks that the state directory is writable, the snapshot key is readable and the lease registry answers (a SQLite database that does not exist yet is created at the first start and reported as such). When the launch fails because of the sandbox, it prints a hint about the `--no-sandbox` launch profile argument. Exit status is non-zero when any check fails.
 
 ## `browserx session`
 

@@ -20,6 +20,8 @@ The following native components are built from source by Cargo build scripts and
 | --- | --- | --- | --- |
 | SQLite | `libsqlite3-sys` (bundled) | the lease registry | SQLite is public domain; the Rust bindings are MIT |
 | ring | `ring` | rustls cryptography | Apache-2.0 AND ISC, with the licenses of its bundled sources in the crate |
+| AWS-LC | `aws-lc-sys` (through `aws-lc-rs`) | rustls cryptography provider | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause, with the licenses of its bundled sources in the crate |
+| LZ4 | `lz4-sys` | record batch compression support of the Kafka client | BSD-2-Clause for the library; the Rust bindings are MIT |
 
 ## Data embedded in the binary
 

@@ -510,6 +510,54 @@ async fn concurrent_handoffs_have_one_winner() {
     );
 }
 
+/// Renewals racing one handoff: the handoff takes effect exactly once, and every renewal
+/// either landed before it or is refused afterwards (old token or old generation).
+#[tokio::test]
+async fn concurrent_renewals_and_a_handoff_never_resurrect_the_old_generation() {
+    let h = harness(test_cfg());
+    let (lease, token) = h.pool.create(OWNER, SessionSpec::default()).await.unwrap();
+    let id = lease.session_id;
+    let mut renewals = Vec::new();
+    for _ in 0..8 {
+        let pool = h.pool.clone();
+        let token = token.clone();
+        renewals.push(tokio::spawn(async move {
+            pool.renew(OWNER, id, &token, Generation(1), None).await
+        }));
+    }
+    let handoff = {
+        let pool = h.pool.clone();
+        let token = token.clone();
+        tokio::spawn(async move { pool.handoff(OWNER, id, &token, Generation(1)).await })
+    };
+    let (_, fresh) = handoff.await.unwrap().unwrap();
+    for renewal in renewals {
+        match renewal.await.unwrap() {
+            Ok(renewed) => assert_eq!(renewed.generation, Generation(1)),
+            Err(Error::Forbidden(_) | Error::StaleGeneration { .. }) => {}
+            Err(e) => panic!("unexpected {e}"),
+        }
+    }
+    let now = h.pool.get(OWNER, id).await.unwrap();
+    assert_eq!(
+        now.generation,
+        Generation(2),
+        "exactly one handoff took effect"
+    );
+    assert!(matches!(
+        h.pool.renew(OWNER, id, &token, Generation(1), None).await,
+        Err(Error::Forbidden(_))
+    ));
+    assert!(matches!(
+        h.pool.renew(OWNER, id, &fresh, Generation(1), None).await,
+        Err(Error::StaleGeneration { .. })
+    ));
+    h.pool
+        .renew(OWNER, id, &fresh, Generation(2), None)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn recovery_ephemeral_is_fresh_and_loses_cookies() {
     let h = harness(test_cfg());
@@ -989,6 +1037,35 @@ async fn shared_browser_retires_after_serving_its_quota() {
     );
     h.pool
         .release("o3", c.session_id, Some(&tc), None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn shared_browser_retires_by_age_and_takes_no_new_contexts() {
+    let mut cfg = test_cfg();
+    cfg.max_contexts_per_browser = 4;
+    cfg.browser_max_age = Duration::from_secs(600);
+    cfg.warm_shared_browsers = 1;
+    let h = harness(cfg);
+    let (a, ta) = h.pool.create(OWNER, shared()).await.unwrap();
+    let first = h.rt.browsers()[0].clone();
+    assert_eq!(h.rt.launch_count(), 1);
+
+    h.clock.advance(time::Duration::seconds(601));
+    // Past its age the browser takes no new context, even with free slots.
+    let (b, tb) = h.pool.create("o2", shared()).await.unwrap();
+    assert_eq!(h.rt.launch_count(), 2);
+    assert_ne!(a.browser_id, b.browser_id);
+    assert!(first.is_alive(), "it still serves the context it has");
+
+    h.pool
+        .release(OWNER, a.session_id, Some(&ta), None)
+        .await
+        .unwrap();
+    assert!(!first.is_alive(), "an old browser retires when it is empty");
+    h.pool
+        .release("o2", b.session_id, Some(&tb), None)
         .await
         .unwrap();
 }

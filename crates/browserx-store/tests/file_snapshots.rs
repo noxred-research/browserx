@@ -133,3 +133,48 @@ async fn corruption_is_reported_not_hidden() {
         Err(Error::Storage(_))
     ));
 }
+
+#[tokio::test]
+async fn rotation_keeps_old_snapshots_restorable_from_disk() {
+    use browserx_store::Sealer;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (old_key, new_key) = (dir.path().join("old.key"), dir.path().join("new.key"));
+    Sealer::generate_key_file(&old_key).unwrap();
+    Sealer::generate_key_file(&new_key).unwrap();
+    let root = dir.path().join("snaps");
+    let profile = ProfileId::new();
+
+    // Written before the rotation, with the key that is about to retire.
+    let old = Sealer::from_key_file(&old_key).unwrap();
+    let old_id = old.key_id().to_owned();
+    FileSnapshotStore::new(root.clone())
+        .unwrap()
+        .put(&sealed_snapshot(&old, profile, 1))
+        .await
+        .unwrap();
+
+    // After rotating, with the old key retired: the old snapshot opens, new ones use the new key.
+    let mut rotated = Sealer::from_key_file(&new_key).unwrap();
+    rotated.add_retired_key_file(&old_key).unwrap();
+    let store = FileSnapshotStore::new(root.clone()).unwrap();
+    let restored = store.latest(profile).await.unwrap().unwrap();
+    assert_eq!(restored.meta.key_id, old_id);
+    assert!(rotated.open(&restored).is_ok());
+    store
+        .put(&sealed_snapshot(&rotated, profile, 2))
+        .await
+        .unwrap();
+    let newest = store.latest(profile).await.unwrap().unwrap();
+    assert_eq!(newest.meta.key_id, rotated.key_id());
+    assert_ne!(newest.meta.key_id, old_id);
+    assert!(rotated.open(&newest).is_ok());
+
+    // Without the retired key the old snapshot is refused and the error names the key id.
+    let forgetful = Sealer::from_key_file(&new_key).unwrap();
+    let err = forgetful.open(&restored).unwrap_err();
+    assert!(
+        matches!(&err, Error::Crypto(m) if *m == format!("unknown key_id {old_id}")),
+        "unexpected error: {err}"
+    );
+}

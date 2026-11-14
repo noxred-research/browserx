@@ -40,4 +40,4 @@ pub use error::{ApiError, status_of};
 pub use limits::ServerLimits;
 pub use ops::{ops_router, render_metrics};
 pub use relay::MAX_MESSAGE_BYTES;
-pub use run::{build, run, serve, shutdown_signal};
+pub use run::{build, ping_lease_registry, run, serve, shutdown_signal};

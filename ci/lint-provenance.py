@@ -22,14 +22,25 @@ Further rules:
 * `email-address`: e-mail addresses other than clearly synthetic ones (`example.*`, `*.test`,
   `*.invalid`, `localhost`).
 
+History mode (`--history`) applies the same rules to everything a clone can fetch: every ref
+name (branches, tags, `refs/pull/*`), every commit message, every tag annotation and every
+blob of every commit reachable from any ref, including its paths. It adds one rule,
+`identity`: an author, committer, tagger or trailer identity must be an account handle
+(letters, digits, `.`, `_`, `-`, optional `[bot]`) with a GitHub noreply address, never a
+personal name or a private mail address. Earlier versions of the hash file must hold only
+well-formed rules (`hash-file`).
+
 Usage: ci/lint-provenance.py [PATH ...]
+       ci/lint-provenance.py --history
 Default: every file `git ls-files` lists plus untracked files that are not ignored.
 Exit status: 0 clean, 1 on any hit, 2 when the hash file is missing or malformed. Hits print as
-`file:line: [rule]` without the matched text, so CI logs never spell a retired name.
+`file:line: [rule]` without the matched text, so CI logs never spell a retired name. History
+hits print as `blob <oid>:<path>:<line>`, `commit <oid>:<line>` or `ref <name>`.
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import re
 import subprocess
@@ -55,6 +66,10 @@ HANDLE = re.compile(r"kaan-zero" + r"day", re.IGNORECASE)
 HANDLE_ALLOWED = {".github/CODEOWNERS"}
 EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})\b")
 EMAIL_OK_DOMAIN = re.compile(r"(?:^|\.)example(?:\.[a-z]+)?$|\.test$|\.invalid$|^localhost$", re.IGNORECASE)
+# History identities: an account handle (or bot) and a GitHub noreply address.
+IDENTITY_NAME = re.compile(r"^[A-Za-z0-9._-]+(?:\[bot\])?$")
+IDENTITY_MAIL = re.compile(r"^(?:[0-9]+\+)?[A-Za-z0-9._-]+(?:\[bot\])?@users\.noreply\.github\.com$|^(?:noreply|support)@github\.com$")
+TRAILER = re.compile(r"^(?:Signed-off-by|Co-authored-by|Reviewed-by|Acked-by|Tested-by|Reported-by|Suggested-by|Helped-by):\s*(.*?)\s*<([^<>]*)>\s*$", re.IGNORECASE)
 
 
 def sha(text: str) -> str:
@@ -99,11 +114,29 @@ def tokens(text: str):
                 yield part.lower()
 
 
+def well_formed_hash_file(text: str) -> bool:
+    """True when every line of a hash-file version is blank, a comment or a hash-only rule."""
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        digest = parts[-1]
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            return False
+        if not (
+            (parts[0] == "word" and len(parts) == 2)
+            or (parts[0] == "substr" and len(parts) == 3 and parts[1].isdigit() and int(parts[1]) > 0)
+        ):
+            return False
+    return True
+
+
 class Rules:
     def __init__(self) -> None:
         self.words, self.substrings = load_rules()
+        self.matches = functools.lru_cache(maxsize=1 << 16)(self._matches)
 
-    def matches(self, text: str) -> bool:
+    def _matches(self, text: str) -> bool:
         """True when `text` carries a hashed word or substring term."""
         if any(sha(t) in self.words for t in tokens(text)):
             return True
@@ -126,7 +159,29 @@ def files(args: list[str]) -> list[Path]:
     return [Path(p) for p in out.decode().split("\0") if p]
 
 
+
+
+def check_text(rules: Rules, report, label: str, text: str, handle_ok: bool, emails: bool = True) -> None:
+    """Apply the per-line rules to `text`; `report(label, line, rule)` records a hit."""
+    for number, line in enumerate(text.splitlines(), 1):
+        if rules.matches(line):
+            report(label, number, "retired-name")
+        if HOST_PATH.search(line):
+            report(label, number, "host-path")
+        if PRIVILEGED_TRIGGER.search(line):
+            report(label, number, "privileged-pr-trigger")
+        if CITATION.search(line):
+            report(label, number, "internal-citation")
+        if HANDLE.search(line) and not handle_ok:
+            report(label, number, "maintainer-handle")
+        if emails and any(not EMAIL_OK_DOMAIN.search(m.group(1)) for m in EMAIL.finditer(line)):
+            report(label, number, "email-address")
+
+
 def main(argv: list[str]) -> int:
+    if any(a.startswith("--") for a in argv) and argv != ["--history"]:
+        print("usage: lint-provenance.py [PATH ...] | --history", file=sys.stderr)
+        return 2
     rules = Rules()
     hits = 0
 
@@ -136,38 +191,107 @@ def main(argv: list[str]) -> int:
         print(f"{where}: [{rule}]")
         hits += 1
 
-    for path in files(argv):
-        label = path.as_posix()
-        if not path.is_file() or path.is_symlink():
-            continue
-        if path.suffix in SKIP_SUFFIXES or path.name in SKIP_NAMES or path.name == HASH_FILE.name:
-            continue
-        if rules.matches(label):
-            report(label, None, "retired-name in path")
-        if path.stat().st_size > MAX_BYTES:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
-        handle_ok = label in HANDLE_ALLOWED
-        for number, line in enumerate(text.splitlines(), 1):
-            if rules.matches(line):
-                report(label, number, "retired-name")
-            if HOST_PATH.search(line):
-                report(label, number, "host-path")
-            if PRIVILEGED_TRIGGER.search(line):
-                report(label, number, "privileged-pr-trigger")
-            if CITATION.search(line):
-                report(label, number, "internal-citation")
-            if HANDLE.search(line) and not handle_ok:
-                report(label, number, "maintainer-handle")
-            if any(not EMAIL_OK_DOMAIN.search(m.group(1)) for m in EMAIL.finditer(line)):
-                report(label, number, "email-address")
+    if argv == ["--history"]:
+        history(rules, report)
+    else:
+        for path in files(argv):
+            label = path.as_posix()
+            if not path.is_file() or path.is_symlink():
+                continue
+            if path.suffix in SKIP_SUFFIXES or path.name in SKIP_NAMES or path.name == HASH_FILE.name:
+                continue
+            if rules.matches(label):
+                report(label, None, "retired-name in path")
+            if path.stat().st_size > MAX_BYTES:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            check_text(rules, report, label, text, label in HANDLE_ALLOWED)
     if hits:
         print(f"lint-provenance: {hits} hit(s)", file=sys.stderr)
         return 1
     return 0
+
+
+def git_bytes(*args: str, stdin: bytes | None = None) -> bytes:
+    return subprocess.run(["git", *args], check=True, capture_output=True, input=stdin).stdout
+
+
+def identity_ok(name: str, mail: str) -> bool:
+    return bool(IDENTITY_NAME.match(name) and IDENTITY_MAIL.match(mail))
+
+
+def history(rules: Rules, report) -> None:
+    """Scan every ref name, commit, tag annotation and blob reachable from any ref."""
+    # Ref names (a fetchable `refs/pull/*` counts as much as a branch).
+    for ref in git_bytes("for-each-ref", "--format=%(refname)").decode().split():
+        if rules.matches(ref):
+            report(f"ref {ref}", None, "retired-name in ref name")
+
+    # Commits: identities and messages. 0x1e starts a record, 0x1f separates fields.
+    fmt = "%x1e%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B"
+    log = git_bytes("log", "--all", f"--format={fmt}").decode("utf-8", "replace")
+    for record in log.split("\x1e")[1:]:
+        oid, an, ae, cn, ce, body = record.split("\x1f", 5)
+        label = f"commit {oid[:12]}"
+        for name, mail in ((an, ae), (cn, ce)):
+            if not identity_ok(name, mail):
+                report(label, None, "identity")
+        trailers: set[int] = set()
+        for number, line in enumerate(body.splitlines(), 1):
+            m = TRAILER.match(line)
+            if m:
+                trailers.add(number)
+                if not identity_ok(m.group(1), m.group(2)):
+                    report(label, number, "identity")
+        kept = "\n".join("" if n in trailers else line for n, line in enumerate(body.splitlines(), 1))
+        check_text(rules, report, label, kept, handle_ok=True)
+
+    # Annotated tags.
+    tags = git_bytes(
+        "for-each-ref", "refs/tags", "--format=%(refname)%1f%(taggername)%1f%(taggeremail:trim)%1f%(contents)%1e"
+    ).decode("utf-8", "replace")
+    for record in tags.split("\x1e"):
+        record = record.strip("\n")
+        if not record:
+            continue
+        ref, tname, tmail, contents = record.split("\x1f", 3)
+        if tname and not identity_ok(tname, tmail):
+            report(f"tag {ref}", None, "identity")
+        check_text(rules, report, f"tag {ref}", contents, handle_ok=True)
+
+    # Blobs: every distinct object of every reachable tree, with every path it ever had.
+    paths: dict[str, set[str]] = {}
+    for line in git_bytes("rev-list", "--objects", "--all").decode("utf-8", "replace").splitlines():
+        oid, _, path = line.partition(" ")
+        if path:
+            paths.setdefault(oid, set()).add(path)
+    oids = sorted(paths)
+    batch = git_bytes("cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)", stdin="".join(f"{o}\n" for o in oids).encode())
+    blobs = [line.split() for line in batch.decode().splitlines()]
+    blobs = [(o, int(size)) for o, kind, size in blobs if kind == "blob"]
+    reported_paths: set[str] = set()
+    for oid, size in blobs:
+        names = sorted(paths[oid])
+        for path in names:
+            if path not in reported_paths and rules.matches(path):
+                reported_paths.add(path)
+                report(f"blob {oid[:12]}:{path}", None, "retired-name in path")
+        label = f"blob {oid[:12]}:{names[0]}" + (f" (+{len(names) - 1} more paths)" if len(names) > 1 else "")
+        if all(Path(n).suffix in SKIP_SUFFIXES or Path(n).name in SKIP_NAMES for n in names) or size > MAX_BYTES:
+            continue
+        data = git_bytes("cat-file", "blob", oid)
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if all(Path(n).name == HASH_FILE.name for n in names):
+            if not well_formed_hash_file(text):
+                report(label, None, "hash-file")
+            continue
+        check_text(rules, report, label, text, handle_ok=all(n in HANDLE_ALLOWED for n in names))
 
 
 if __name__ == "__main__":

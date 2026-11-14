@@ -54,7 +54,7 @@ python3 ci/check-docs-links.py
 cargo deny --locked check licenses advisories bans sources
 ```
 
-`ci/lint-provenance.py` is the public-tree hygiene gate. It checks a hashed rule set (`ci/provenance-hashes.txt`) so that the repository never has to spell the names it must not contain, and it rejects absolute developer paths, references to internal design records and e-mail addresses that are not obviously synthetic. It prints `file:line: [rule]` without the matched text. `ci/check-docs-links.py` checks that relative links and anchors in Markdown files resolve.
+`ci/lint-provenance.py` is the public-tree hygiene gate. It checks a hashed rule set (`ci/provenance-hashes.txt`) so that the repository never has to spell the names it must not contain, and it rejects absolute developer paths, references to internal design records and e-mail addresses that are not obviously synthetic. It prints `file:line: [rule]` without the matched text. `ci/lint-provenance.py --history` applies the same rules to every fetched ref, commit message, tag and file version, and requires commit identities to be account handles with a GitHub noreply address (set your commit name to your handle). `ci/check-docs-links.py` checks that relative links and anchors in Markdown files resolve.
 
 To run the tests against a real browser:
 
