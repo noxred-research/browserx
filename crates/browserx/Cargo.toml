@@ -1,0 +1,40 @@
+[package]
+name = "browserx"
+description = "BrowserX: browser pooling, session management, persistence, recovery and handoff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "browserx"
+path = "src/main.rs"
+
+[dependencies]
+browserx-core.workspace = true
+browserx-mcp.workspace = true
+browserx-runtime.workspace = true
+browserx-server.workspace = true
+browserx-store.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+rand.workspace = true
+hex.workspace = true
+serde.workspace = true
+tempfile.workspace = true
+
+[features]
+# Test-only: `browserx agent eval --mutate <layer>` switches one enforcement layer off so the
+# evaluation can prove it notices. Never enabled in releases.
+fault-injection = ["browserx-mcp/fault-injection"]
+
+[lints]
+workspace = true

@@ -1,0 +1,201 @@
+{
+  "version": 1,
+  "description": "Protocol conformance vectors, legacy revisions (2025-06-18, 2025-03-26). Each case is one HTTP POST; `expect` is a subset match.",
+  "cases": [
+    {
+      "id": "legacy-initialize-2025-06-18",
+      "description": "the preferred legacy revision is echoed",
+      "headers": {
+        "MCP-Protocol-Version": "2025-06-18"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-06-18",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "v",
+            "version": "1"
+          }
+        }
+      },
+      "expect": {
+        "status": 200,
+        "result": {
+          "protocolVersion": "2025-06-18",
+          "serverInfo": {
+            "name": "browserx-mcp"
+          }
+        },
+        "absent": [
+          "result.resultType",
+          "result.ttlMs"
+        ]
+      }
+    },
+    {
+      "id": "legacy-initialize-2025-03-26",
+      "description": "the older legacy revision is echoed",
+      "headers": {},
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-03-26",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "v",
+            "version": "1"
+          }
+        }
+      },
+      "expect": {
+        "status": 200,
+        "result": {
+          "protocolVersion": "2025-03-26"
+        }
+      }
+    },
+    {
+      "id": "legacy-initialize-unknown-version",
+      "description": "an unknown version in initialize negotiates down to the preferred legacy revision",
+      "headers": {},
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "1999-01-01",
+          "capabilities": {}
+        }
+      },
+      "expect": {
+        "status": 200,
+        "result": {
+          "protocolVersion": "2025-06-18"
+        }
+      }
+    },
+    {
+      "id": "legacy-ping",
+      "description": "a legacy request needs no per-request metadata",
+      "headers": {
+        "MCP-Protocol-Version": "2025-06-18"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping",
+        "params": {}
+      },
+      "expect": {
+        "status": 200,
+        "result": {},
+        "absent": [
+          "result.resultType"
+        ]
+      }
+    },
+    {
+      "id": "legacy-tools-list-has-no-modern-envelope",
+      "description": "lists carry annotations and output schemas but no ttlMs in a legacy answer",
+      "headers": {
+        "MCP-Protocol-Version": "2025-06-18"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {}
+      },
+      "expect": {
+        "status": 200,
+        "absent": [
+          "result.ttlMs",
+          "result.cacheScope",
+          "result.resultType"
+        ],
+        "tools_sorted": true,
+        "tools_have": [
+          "name",
+          "title",
+          "description",
+          "inputSchema",
+          "outputSchema",
+          "annotations"
+        ]
+      }
+    },
+    {
+      "id": "legacy-unsupported-header-version",
+      "description": "an unserved version header is refused with the supported list",
+      "headers": {
+        "MCP-Protocol-Version": "1999-01-01"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping",
+        "params": {}
+      },
+      "expect": {
+        "status": 400,
+        "error_code": -32022,
+        "error_data": {
+          "supported": [
+            "2026-07-28",
+            "2025-06-18",
+            "2025-03-26"
+          ]
+        }
+      }
+    },
+    {
+      "id": "legacy-validation-error-is-a-tool-result",
+      "description": "bad arguments are an isError result the model can correct",
+      "headers": {
+        "MCP-Protocol-Version": "2025-06-18"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "explain_error",
+          "arguments": {
+            "code": 5
+          }
+        }
+      },
+      "expect": {
+        "status": 200,
+        "result": {
+          "isError": true
+        }
+      }
+    },
+    {
+      "id": "legacy-unknown-tool",
+      "description": "an unknown tool is a protocol error",
+      "headers": {
+        "MCP-Protocol-Version": "2025-06-18"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "no_such_tool",
+          "arguments": {}
+        }
+      },
+      "expect": {
+        "status": 200,
+        "error_code": -32602
+      }
+    }
+  ]
+}
