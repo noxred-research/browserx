@@ -393,15 +393,26 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let (proc, _url) = spawn(
-            &script,
-            &[],
-            &BTreeMap::new(),
-            Duration::from_secs(10),
-            |_| Ok(()),
-        )
-        .await
-        .unwrap();
+        // Writing then executing a script can race with a fork elsewhere in the test process
+        // (ETXTBSY); retry like the other script-based tests do.
+        let mut attempts = 0;
+        let (proc, _url) = loop {
+            match spawn(
+                &script,
+                &[],
+                &BTreeMap::new(),
+                Duration::from_secs(10),
+                |_| Ok(()),
+            )
+            .await
+            {
+                Err(e) if attempts < 20 && e.to_string().contains("Text file busy") => {
+                    attempts += 1;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                other => break other.unwrap(),
+            }
+        };
         assert!(
             proc.wait_exit(Duration::from_secs(10)).await,
             "leader exit not noticed"
@@ -427,19 +438,28 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\nsleep 300\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let seen = std::cell::Cell::new(0u32);
-        let err = spawn(
-            &script,
-            &[],
-            &BTreeMap::new(),
-            Duration::from_secs(10),
-            |pid| {
-                seen.set(pid);
-                Err(Error::Storage("cannot record".into()))
-            },
-        )
-        .await
-        .err()
-        .unwrap();
+        let mut attempts = 0;
+        let err = loop {
+            let result = spawn(
+                &script,
+                &[],
+                &BTreeMap::new(),
+                Duration::from_secs(10),
+                |pid| {
+                    seen.set(pid);
+                    Err(Error::Storage("cannot record".into()))
+                },
+            )
+            .await
+            .err()
+            .unwrap();
+            if attempts < 20 && result.to_string().contains("Text file busy") {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            } else {
+                break result;
+            }
+        };
         assert!(matches!(err, Error::Storage(_)), "{err:?}");
         assert_ne!(seen.get(), 0);
         assert!(!Path::new(&format!("/proc/{}", seen.get())).exists());
