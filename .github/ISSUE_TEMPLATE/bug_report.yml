@@ -16,7 +16,7 @@ body:
     attributes:
       label: browserx version or commit
       description: Output of `browserx --version`, or the commit you built.
-      placeholder: "0.1.0-dev"
+      placeholder: "0.1.0"
     validations:
       required: true
   - type: dropdown

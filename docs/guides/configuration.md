@@ -132,6 +132,10 @@ headless = true
 args = ["--window-size=1920,1080"]
 ```
 
+## `[database]` and `[object_store]`
+
+Both are optional. Without them the worker keeps its lease registry in SQLite and its sealed snapshots under `storage.state_dir`. `[database]` moves the lease registry to PostgreSQL or MariaDB (with a required `node`), and `[object_store]` moves sealed snapshots to an S3-compatible object store. Every key is described in the [backends guide](backends.md).
+
 ## Environment variables
 
 | Variable | Used by | Meaning |

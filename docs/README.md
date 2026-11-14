@@ -1,6 +1,6 @@
 # BrowserX documentation
 
-BrowserX is next-generation AI/LLM-native browser pooling, session management, persistence, recovery and handoff for authorized security research. AI agents can watch, drive and explain a worker within limits an operator sets; models advise and never authorize, and leases, recovery and egress policy stay deterministic code. These pages describe `0.1.0-dev`. They are written for operators who run a worker and for developers who integrate a client; none of them depends on another repository.
+BrowserX is next-generation AI/LLM-native browser pooling, session management, persistence, recovery and handoff for authorized security research. AI agents can watch, drive and explain a worker within limits an operator sets; models advise and never authorize, and leases, recovery and egress policy stay deterministic code. These pages describe `0.1.0`. They are written for operators who run a worker and for developers who integrate a client; none of them depends on another repository.
 
 ## Design
 

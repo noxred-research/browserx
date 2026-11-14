@@ -9,7 +9,7 @@
 
 One Rust service supervises local Chromium processes, leases them to automation clients as sessions, keeps the state you ask it to keep, replaces browsers that die, and moves control of a live session from one client to another, with an explicit answer to the question every client has: what survived? A built-in [Model Context Protocol](docs/guides/mcp.md) server lets AI agents watch, drive and explain the pool within limits the operator sets, while leases, recovery and egress policy stay deterministic code.
 
-[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE) [![CI](https://github.com/noxred-research/browserx/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/noxred-research/browserx/actions/workflows/ci.yml) [![Version 0.1.0-dev](https://img.shields.io/badge/version-0.1.0--dev-informational)](CHANGELOG.md) [![Rust 1.99.0](https://img.shields.io/badge/rust-1.99.0-orange?logo=rust)](rust-toolchain.toml) [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md) [![Security policy](https://img.shields.io/badge/security-policy-informational?logo=github)](SECURITY.md)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE) [![CI](https://github.com/noxred-research/browserx/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/noxred-research/browserx/actions/workflows/ci.yml) [![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-informational)](CHANGELOG.md) [![Rust 1.99.0](https://img.shields.io/badge/rust-1.99.0-orange?logo=rust)](rust-toolchain.toml) [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md) [![Security policy](https://img.shields.io/badge/security-policy-informational?logo=github)](SECURITY.md)
 
 [What it is](#what-is-browserx) · [Core idea](#the-core-idea-three-different-contracts) · [Features](#features) · [AI/LLM-native](#aillm-native) · [Architecture](#architecture) · [Quick start](#quick-start) · [API](#api-at-a-glance) · [Configuration](#configuration) · [Observability](#observability) · [Responsible use](#responsible-use-and-security) · [Docs](#documentation)
 
@@ -18,14 +18,14 @@ One Rust service supervises local Chromium processes, leases them to automation 
 > [!IMPORTANT]
 > **For authorized security research and authorized automation only.** BrowserX is for operating browsers and network egress that you own or are permitted to operate, against sites and services you are permitted to test or automate, within an engagement scope you can show. AI agents that drive it act under the same rule. It makes no promise about how a target site treats a browser it runs, and it is not a tool for evading protections, abusing third-party services or attacking anyone. See [Responsible use and security](#responsible-use-and-security).
 
-> **Status:** pre-1.0 (`0.1.0-dev`). Interfaces, configuration keys, on-disk formats and the HTTP API can still change between minor versions, and the [changelog](CHANGELOG.md) lists what changed. The distribution is this repository and tagged source releases; no prebuilt binaries or images are published, so build from source or with the provided Dockerfile.
+> **Status:** pre-1.0 (`0.1.0`). Interfaces, configuration keys, on-disk formats and the HTTP API can still change between minor versions, and the [changelog](CHANGELOG.md) lists what changed. The distribution is this repository and tagged source releases; no prebuilt binaries, images or crates.io packages are published, so build from source (see [Quick start](#quick-start)) or with the provided Dockerfile.
 
 ## What is BrowserX
 
 BrowserX is a single worker process, written in Rust, that turns a machine with Chromium installed into a managed browser service.
 
 - **Pooling.** It launches and supervises Chromium processes, keeps a warm pool of shared browsers if you want one, and admits session requests through a bounded queue with per-owner quotas and a deadline.
-- **Session management.** A session is a *lease*: an identity, an owner, a time-to-live, a fencing generation and a controller token. Leases are stored in SQLite and every change is a compare-and-swap, so two writers can never both win.
+- **Session management.** A session is a *lease*: an identity, an owner, a time-to-live, a fencing generation and a controller token. Leases are stored in SQLite by default (PostgreSQL or MariaDB when several workers share one registry) and every change is a compare-and-swap, so two writers can never both win.
 - **Persistence.** You choose exactly what outlives the browser process: nothing (`ephemeral`), encrypted cookie and storage snapshots (`snapshot`) or a locked profile directory (`profile`). There is no boolean "persistent" flag, because each mode is a different engineering contract.
 - **Recovery.** A health monitor notices a dead or unresponsive browser, launches a replacement, restores what the persistence mode kept and tells the next client exactly what happened.
 - **Handoff.** Control of a live session moves to a new client with one call. The generation increments, the old token and any relay connection bound to it stop working, and the browser keeps running.
@@ -60,6 +60,7 @@ A client that sees anything other than `resumed_same_process` knows to re-establ
 | **Launch profiles** | Named launch configurations: your own Chromium executable, extra flags, headless or headed. See [launch profiles](docs/guides/launch-profiles.md) |
 | **HTTP API and CLI** | JSON API with typed errors, and `browserx session create\|list\|get\|attach\|renew\|handoff\|snapshot\|release` |
 | **MCP server** | `browserx mcp` serves the Model Context Protocol (revisions `2026-07-28`, `2025-06-18` and `2025-03-26`) over stdio or loopback HTTP: capability-gated tools, a scope-checked browsing loop, an action gate with human approvals, signed engagement manifests and scope grants, a hash-chained audit log. See [AI/LLM-native](#aillm-native) |
+| **Backends** | SQLite and a snapshot directory by default, with no other service. Optionally: leases in PostgreSQL or MariaDB (`[database]`, a required `node` per worker), sealed snapshots in an S3-compatible object store (`[object_store]`), MCP rate limits and call budgets shared through Valkey or Redis (`[cache]`), and copies of the MCP audit log in ClickHouse, Kafka, RabbitMQ, OpenSearch or Elasticsearch. Several workers and products can share one service instance because each writes only inside its own namespace. See [backends](docs/guides/backends.md) |
 | **Operations** | Separate ops listener with `/healthz`, `/readyz` and Prometheus `/metrics`; graceful drain on SIGINT/SIGTERM with final snapshots and confirmed browser shutdown. See [operations](docs/guides/operations.md) |
 
 ## AI/LLM-native
@@ -122,20 +123,20 @@ The workspace is split by responsibility:
 | `browserx-cdp` | Bounded Chrome DevTools Protocol client |
 | `browserx-runtime` | Chromium process supervision, launch profiles, profile locks, state capture and restore |
 | `browserx-egress` | Per-session loopback forwarder and destination policy |
-| `browserx-store` | SQLite lease registry, sealed snapshot files, the snapshot sealer |
+| `browserx-store` | Lease registry (SQLite, PostgreSQL, MariaDB), sealed snapshots (directory or S3-compatible object store), the snapshot sealer |
 | `browserx-pool` | Scheduler: admission, allocation, renewal, expiry, recovery, handoff |
 | `browserx-server` | HTTP API, CDP relay, ops endpoints, metrics |
-| `browserx-mcp` | Model Context Protocol server: tools, resources, prompts, scope checks, audit log |
+| `browserx-mcp` | Model Context Protocol server: tools, resources, prompts, scope checks, audit log and its optional export sinks |
 | `browserx` | The binary: `serve`, `mcp`, `doctor`, key tools and the client commands |
 
 Read the [architecture overview](docs/design/architecture.md) for how a request flows through them.
 
 ## Quick start
 
-You need a Rust toolchain (the version in [`rust-toolchain.toml`](rust-toolchain.toml); `rustup` installs it) and a Chromium executable on `PATH` or named by `BROWSERX_CHROMIUM_PATH`.
+You need a Rust toolchain (the version in [`rust-toolchain.toml`](rust-toolchain.toml); `rustup` installs it) and a Chromium executable on `PATH` or named by `BROWSERX_CHROMIUM_PATH`. BrowserX is installed from source: clone the repository at a release tag (or `main`) and build it.
 
 ```sh
-cargo build --release
+cargo build --release --locked -p browserx
 
 # 1. Check that this machine can run browsers.
 target/release/browserx doctor
@@ -186,7 +187,7 @@ The [API reference](docs/guides/api.md) has request and response bodies, error c
 
 ## Configuration
 
-One TOML file with `deny_unknown_fields`: a misspelled key is an error, not a silent default. The sections are `[server]`, `[[auth.api_keys]]`, `[pool]`, `[session]`, `[storage]`, `[health]`, `[egress]` and `[runtime]`. A commented example lives in [`examples/browserx.toml`](examples/browserx.toml); every key, default and bound is in the [configuration reference](docs/guides/configuration.md). `browserx config check <path>` validates a file without starting anything.
+One TOML file with `deny_unknown_fields`: a misspelled key is an error, not a silent default. The sections are `[server]`, `[[auth.api_keys]]`, `[pool]`, `[session]`, `[storage]`, `[health]`, `[egress]` and `[runtime]`, plus the optional `[database]` and `[object_store]` ([backends](docs/guides/backends.md)). A commented example lives in [`examples/browserx.toml`](examples/browserx.toml); every key, default and bound is in the [configuration reference](docs/guides/configuration.md). `browserx config check <path>` validates a file without starting anything.
 
 ## Observability
 
@@ -220,6 +221,7 @@ The [documentation index](docs/README.md) lists everything. Start here:
 | Choose what survives a crash | [Persistence](docs/design/persistence.md), [recovery](docs/design/recovery.md) |
 | Move a session between clients | [Handoff](docs/design/handoff.md) |
 | Let an AI agent monitor or drive it | [MCP guide](docs/guides/mcp.md), [AI/LLM-native design](docs/design/ai-llm-native.md) |
+| Move state to PostgreSQL, MariaDB, S3 or share services | [Backends](docs/guides/backends.md), [backends design](docs/design/backends.md) |
 | Connect a client | [Integrating CDP clients](docs/guides/cdp-clients.md) |
 | Route browser traffic through a proxy | [Using an upstream proxy](docs/guides/upstream-proxy.md) |
 | Run it in production | [Operations](docs/guides/operations.md), [configuration](docs/guides/configuration.md) |
