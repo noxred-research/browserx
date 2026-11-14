@@ -77,7 +77,9 @@ BrowserX makes no claim about how a modified build behaves toward any website. Y
 
 ## Running in a container
 
-Chromium's sandbox needs namespaces that many container runtimes restrict. Prefer a runtime that allows them and a non-root user. If you must disable the sandbox, do it explicitly and knowingly in a profile:
+Chromium's sandbox needs user namespaces, which the default container seccomp profile blocks. Keep the sandbox on: run the container with [`docker/seccomp-chromium.json`](../../docker/seccomp-chromium.json) (the default Docker profile with `clone`, `unshare`, `setns` and `chroot` allowed without a capability condition; Compose applies it, with `docker run` pass `--security-opt seccomp=docker/seccomp-chromium.json`) and a non-root user. The shipped [`docker/browserx.docker.toml`](../../docker/browserx.docker.toml) does not pass `--no-sandbox`.
+
+If your runtime cannot allow user namespaces, disabling the sandbox is an explicit opt-in in a profile. A no-sandbox browser has the privileges of the worker process, including the snapshot key and the lease database, so a renderer bug compromises everything the worker holds (see [SECURITY.md](../../SECURITY.md#deployment-requirements)):
 
 ```toml
 [runtime.launch_profiles.container]
@@ -98,6 +100,6 @@ args = ["--no-sandbox", "--disable-dev-shm-usage"]
 | `default` | Headless, no extra flags |
 | `debug` | Headed with a `DISPLAY`, for looking at what a session does |
 | `pinned` | A specific Chromium build for reproducible runs |
-| `container` | `--no-sandbox` on a worker you accept that trade-off for |
+| `container` | `--no-sandbox` on a worker whose runtime cannot allow user namespaces, one trust domain per worker |
 
 Keep the set small: every profile is a thing to test and to patch.

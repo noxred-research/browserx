@@ -61,6 +61,7 @@ Review findings on the trust foundation (before its first release):
 - **Scope grants.** The exfiltration guard sees secrets in query keys and percent-encoded paths and fragments; a proposal can no longer drop the plan, raise budgets or move the window to count as narrowing; plan origins are normalized; screenshots count as untrusted input; links longer than a URL the browser would accept are not kept.
 - **Manifest hosts.** IDN hosts match by punycode and bracketed IPv6 literals are accepted.
 - **HTTP.** A `2026-07-28` header binds the request to that revision (`-32020` for a body that does not declare it).
+- **The container image builds.** The Dockerfile now copies `docs/` and `examples/`, which the MCP server embeds at build time.
 
 ### Changed
 
@@ -86,9 +87,16 @@ Review findings on the trust foundation (before its first release):
 - **An oversized DevTools reply no longer retires a browser.** The worker's control connection is reopened after a closed connection (and by health probes) instead of staying dead; an origin whose storage reply is too large is skipped. New `runtime.cdp_max_message_bytes`.
 - **Secrets are zeroized and key files are strict.** `Secret`, the rendered `Proxy-Authorization` header and SOCKS5 credentials are wiped on drop; the snapshot key is passed by reference as a `Zeroizing` buffer (`Sealer::new` takes `&Zeroizing<[u8; 32]>`). A key file must be owned by the current user and be `0600` or stricter (group access was only a warning); new key directories are created `0700`.
 - **Startup timeout is bounded.** `runtime.startup_timeout_secs` above 600 is rejected, and the launch deadline uses checked arithmetic, so a huge value can no longer panic the launching task.
+- **Dedicated relays refuse the CDP escape hatches.** `Target.exposeDevToolsProtocol` (a page-side binding that opens a browser-level channel the relay never sees, and through it `proxyServer`, `file:` navigation and file selection), `Target.openDevTools`, `Target.setRemoteLocations`, `Browser.getBrowserCommandLine` and `Browser.executeBrowserCommand` are refused in the shared `method_refusal` path, so every relay mode refuses them. A dedicated relay also forwards only the protocol domains a shared relay allows on page sessions; `Tethering`, domains a newer Chromium adds and unknown names are refused. Real-Chromium tests drive a dedicated relay and re-check the `file:`, `proxyServer` and `SystemInfo` refusals.
+- **Browsers do not inherit the worker's environment.** Chromium starts with `env_clear()`, an allow-list (`PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_*`, `TZ`, `XDG_*` directories, fontconfig and display variables) and the launch profile's `env`, so `BROWSERX_DATABASE_PASSWORD`, `BROWSERX_OBJECT_STORE_*` and other secrets never reach `/proc/<browser>/environ`. The worker's own environment is unchanged (see Known limitations).
+- **The container keeps Chromium's sandbox on.** `docker/browserx.docker.toml` no longer passes `--no-sandbox`; `docker/seccomp-chromium.json` (the default Docker profile with `clone`, `unshare`, `setns` and `chroot` allowed without a capability condition) is wired into the Compose file and the `docker run` examples. `--no-sandbox` is documented as an explicit opt-in with its risk.
+- **Kafka SASL needs TLS.** `[events.sasl]` without `tls = true` is refused unless `allow_plaintext = true`, also for a loopback bootstrap address, because brokers can advertise other addresses and the client follows them.
+- **Container images are pinned by digest.** The Dockerfile base images, `ci/run-backend-tests.sh` and the backend tests use `name:tag@sha256:...`; digest bumps are manual. `ci/check-image-pins.py` runs in CI and fails on any image without a digest.
+- **Single-tenant worker hosts are documented.** The DevTools port (random, `127.0.0.1`) and the forwarders trust every local user; `SECURITY.md` and the deployment docs now require a single-tenant host or container, and record the maintainer rule never to approve a fork workflow run without reading its workflow diff.
 
 ### Known limitations
 
+- Secrets that the worker reads from environment variables stay in its own `/proc/<pid>/environ`, because the code base forbids `unsafe` and Rust 2024 makes `remove_var` unsafe. Use the `*_file` settings.
 - The relay and the API speak plaintext `ws://` and `http://`; terminate TLS in front for anything beyond loopback or a trusted network.
 - Shared-browser isolation is not a boundary against hostile tenants.
 - Snapshots can be opened only by the active key or a key listed as retired; a snapshot sealed with any other key cannot be restored.

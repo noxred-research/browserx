@@ -18,7 +18,7 @@ This page states what BrowserX separates, what it does not, which secrets it han
 
 The client has the browser-level endpoint through the relay, so it controls the whole browser, which is its own. Use it for anything where the client is not fully trusted with a neighbor's data, for `profile` persistence, and when you need a per-session proxy or a launch profile of its own.
 
-The dedicated relay parses every client command (bounded by the 64 MiB message limit) and applies the [host-protection rules](#host-protection-rules) below; everything else passes through unchanged. Binary client frames are not forwarded, because the browser would read them as an encoding the relay does not inspect.
+The dedicated relay parses every client command (bounded by the 64 MiB message limit) and applies the [host-protection rules](#host-protection-rules) below; commands of the protocol domains it knows and that no rule refuses pass through unchanged. Binary client frames are not forwarded, because the browser would read them as an encoding the relay does not inspect.
 
 ### Shared browser
 
@@ -44,7 +44,9 @@ Browsers run as the worker's uid, so a relay client must not be able to turn the
 - **Egress.** `Target.createBrowserContext` with `proxyServer` or `proxyBypassList` is refused on a dedicated relay (a context that connects directly would bypass the session's forwarder and its destination policy); shared relays refuse `Target.createBrowserContext` altogether.
 - **Host files.** `DOM.setFileInputFiles`, `Page.handleFileChooser`, `Input.dispatchDragEvent` carrying files and `Extensions.*` are refused.
 - **Downloads.** `Browser.setDownloadBehavior` and `Page.setDownloadBehavior` always get `downloadPath` replaced with `<state_dir>/downloads/<session_id>` (behavior `default` becomes `allow`; `deny` is kept). The directory is removed when the session's last relay connection closes, and `<state_dir>/downloads` is emptied at startup. Downloaded bytes count against the disk of `state_dir`; put a quota on that filesystem if sessions are not trusted with disk space.
-- **Browser-wide data and process control.** `Tracing.*`, `Memory.*`, `SystemInfo.*`, `Browser.close`, `Browser.crash*` and `Target.sendMessageToTarget` are refused. Release a session through the API.
+- **Browser-wide data and process control.** `Tracing.*`, `Memory.*`, `SystemInfo.*`, `Browser.close`, `Browser.crash*`, `Browser.getBrowserCommandLine`, `Browser.executeBrowserCommand` and `Target.sendMessageToTarget` are refused. Release a session through the API.
+- **Channels around the relay.** `Target.exposeDevToolsProtocol` is refused on every relay: it would give page script a browser-level CDP binding that the relay never sees, and through it everything above. `Target.openDevTools` and `Target.setRemoteLocations` are refused as well.
+- **Protocol domains.** A dedicated relay forwards only the protocol domains that clients of a browser-level endpoint use (`Target`, `Browser`, `Page`, `Runtime`, `Network`, `DOM`, `Emulation`, `Fetch`, `Input` and the other page-level domains, the same list a shared relay allows on page sessions). Other domains (`Tethering`, a domain a newer Chromium adds, an unknown name) are refused until they have been reviewed.
 
 These rules close the CDP paths known to reach the worker's files, network position and sibling data. They are not a sandbox: a browser exploit, or a CDP method not covered above, still runs with the worker's privileges. Run the worker under a dedicated uid with only the state directory it needs, keep the snapshot key outside `state_dir` (below), and treat dedicated isolation as the boundary for untrusted clients only together with that host hardening.
 
@@ -82,7 +84,9 @@ The worker launches Chromium with a fixed set of managed flags: `--remote-debugg
 
 Launch profiles cannot override the managed flags: a profile whose `args` set `--remote-debugging-*`, `--user-data-dir`, `--proxy-server`, `--proxy-bypass-list`, `--proxy-pac-url`, `--proxy-auto-detect`, `--no-proxy-server`, `--force-webrtc-ip-handling-policy`, `--webrtc-ip-handling-policy` or `--headless` (use the `headless` key instead) is rejected when the worker starts. The browser-level DevTools endpoint is bound to loopback and is never handed to clients directly.
 
-Chromium's own sandbox stays on unless a launch profile disables it. Running browsers as root in a container usually requires `--no-sandbox`; prefer a non-root user and a container runtime that permits user namespaces, and treat a no-sandbox browser as having the privileges of its process.
+Chromium's own sandbox stays on unless a launch profile disables it with `--no-sandbox`, which is an explicit opt-in: a no-sandbox browser has the privileges of the worker process (snapshot key, lease database, every profile), so a single renderer bug compromises all of them. The shipped container configuration keeps the sandbox on and ships a seccomp profile for it, see [Running in a container](../guides/launch-profiles.md#running-in-a-container).
+
+**The browser's environment.** Chromium does not inherit the worker's environment. It starts with an empty one plus an allow-list (`PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_*`, `TZ`, `LANGUAGE`, the `XDG_*` directory variables, `FONTCONFIG_PATH`, `FONTCONFIG_FILE`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`) plus the launch profile's `env`. Database, object-store and other credentials that the worker reads from its own environment never reach `/proc/<browser>/environ`. The worker's *own* environment still holds them, and a process of the same uid that can read `/proc/<worker>/environ` can read them there. The worker cannot remove them after loading (Rust makes `std::env::remove_var` unsafe and this code base forbids `unsafe`), so prefer the `*_file` form for every secret (`password_file`, `credentials_file`, `api_key_file`), which leaves nothing in the environment, and keep the browser sandbox on.
 
 ## Egress policy
 
@@ -112,7 +116,7 @@ BrowserX is designed to be run by an operator who trusts the machine and the ope
 **Not defended**
 
 - A compromised worker host or a user who can read `state_dir` and the key file.
-- Other local processes on the worker host. Each browser's DevTools endpoint and each session's forwarder listen on loopback without authentication, so any local process can reach them. Run workers on hosts, or in network namespaces, where local processes are trusted.
+- Other local processes on the worker host. Each browser's DevTools endpoint and each session's forwarder listen on `127.0.0.1` (the DevTools port is chosen by the kernel) without authentication, so any local user or process can attach to a browser or use a session's upstream proxy credentials. The worker host or container must be **single-tenant**: no other untrusted local uids, one worker per network namespace or container. `--remote-debugging-pipe` would remove the DevTools port, but the worker keeps several concurrent connections to one browser (a control connection, health probes and one per relay client), which a single pipe cannot carry without a multiplexer; the forwarders would still be reachable by every local uid.
 - A malicious client with dedicated isolation: it controls a real browser on your machine and can run arbitrary page content. Run workers with the least privilege you can.
 - A malicious tenant under shared isolation, as described above.
 - Network observers when you expose plaintext listeners.

@@ -15,8 +15,18 @@
 //! * file selection (`DOM.setFileInputFiles`, `Input.dispatchDragEvent` with
 //!   files) and extension loading (`Extensions.*`) are refused;
 //! * downloads are forced into a per-session directory under the state dir;
-//! * `Tracing.*`, `Memory.*`, `SystemInfo.*`, `Browser.close` and
-//!   `Browser.crash*` are refused (release a session through the API).
+//! * `Tracing.*`, `Memory.*`, `SystemInfo.*`, `Browser.close`,
+//!   `Browser.crash*`, `Browser.getBrowserCommandLine` and
+//!   `Browser.executeBrowserCommand` are refused (release a session through
+//!   the API);
+//! * `Target.exposeDevToolsProtocol`, `Target.openDevTools` and
+//!   `Target.setRemoteLocations` are refused: the first hands page script a
+//!   browser-level CDP channel that bypasses this filter, the others open or
+//!   point DevTools at other endpoints;
+//! * a dedicated relay forwards only the protocol domains in
+//!   [`PAGE_DOMAINS`]: `Tethering`, `Extensions`, `Tracing`, `Memory`,
+//!   `SystemInfo` and any domain a newer browser adds stay unreachable until
+//!   they are reviewed.
 //!
 //! Frames are inspected as JSON text. Binary client frames are refused because
 //! the browser would read them as CBOR, which is not inspected here. Commands
@@ -29,7 +39,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::scope::ClientAction;
+use crate::scope::{ClientAction, PAGE_DOMAINS};
 
 /// The fields every relay needs from a client command.
 #[derive(Deserialize)]
@@ -90,6 +100,15 @@ impl HostPolicy {
             "Browser.close" => Some("the browser is released through the API, not closed over CDP"),
             "Target.sendMessageToTarget" => {
                 Some("non-flat target messaging cannot be inspected; use flattened sessions")
+            }
+            "Target.exposeDevToolsProtocol" => {
+                Some("a page-side CDP binding would bypass the relay's inspection")
+            }
+            "Target.openDevTools" | "Target.setRemoteLocations" => {
+                Some("DevTools front ends and remote locations are not available")
+            }
+            "Browser.getBrowserCommandLine" | "Browser.executeBrowserCommand" => {
+                Some("browser-level host commands are not available")
             }
             "DOM.setFileInputFiles" | "Page.handleFileChooser" => {
                 Some("file selection from the host filesystem is not allowed")
@@ -173,6 +192,10 @@ impl HostPolicy {
     pub(crate) fn inspect(&self, method: &str, text: &str) -> Verdict {
         if let Some(why) = Self::method_refusal(method) {
             return Verdict::Refuse(why);
+        }
+        let domain = method.split_once('.').map_or(method, |(d, _)| d);
+        if !PAGE_DOMAINS.contains(&domain) {
+            return Verdict::Refuse("protocol domain is not available through the relay");
         }
         if !Self::is_sensitive(method) {
             return Verdict::Pass;
@@ -432,7 +455,16 @@ mod tests {
             "Browser.close",
             "Browser.crash",
             "Browser.crashGpuProcess",
+            "Browser.getBrowserCommandLine",
+            "Browser.executeBrowserCommand",
             "Target.sendMessageToTarget",
+            "Target.exposeDevToolsProtocol",
+            "Target.openDevTools",
+            "Target.setRemoteLocations",
+            "Tethering.bind",
+            "Extensions.loadUnpacked",
+            "NewDomainFromTheFuture.run",
+            "NoDomain",
         ] {
             let text = format!(r#"{{"id":7,"sessionId":"S","method":"{method}","params":{{}}}}"#);
             let reply = refused(f.client_message(&text));

@@ -507,6 +507,103 @@ async fn profile_directory_reuse_keeps_cookies_and_the_lock_is_exclusive() {
     assert!(ProfileLock::acquire(&profile_dir).is_ok());
 }
 
+/// The browser runs with an explicit environment: nothing of the worker's own
+/// (credentials loaded from the environment, proxy settings, ...) reaches
+/// `/proc/<browser>/environ`.
+#[tokio::test]
+async fn the_browser_does_not_inherit_the_workers_environment() {
+    let Some(exe) = chromium() else { return };
+    // Cargo gives every test process variables that no browser needs.
+    let foreign: Vec<String> = std::env::vars_os()
+        .filter_map(|(k, _)| k.into_string().ok())
+        .filter(|k| k.starts_with("CARGO_"))
+        .collect();
+    assert!(
+        foreign.iter().any(|k| k == "CARGO_MANIFEST_DIR"),
+        "the test needs foreign variables in its own environment"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let mut rt_cfg = RuntimeConfig {
+        temp_root: temp.path().to_path_buf(),
+        ..RuntimeConfig::default()
+    };
+    rt_cfg.launch_profiles.insert(
+        "default".into(),
+        LaunchProfile {
+            executable: Some(exe),
+            args: vec!["--no-sandbox".into(), "--disable-gpu".into()],
+            env: [("BX_PROFILE_ENV".to_owned(), "kept".to_owned())].into(),
+            ..LaunchProfile::default()
+        },
+    );
+    let handle = ChromiumRuntime::new(rt_cfg)
+        .unwrap()
+        .launch(request(None))
+        .await
+        .unwrap();
+    let environ = std::fs::read(format!("/proc/{}/environ", handle.pid().unwrap())).unwrap();
+    let names: Vec<String> = environ
+        .split(|b| *b == 0)
+        .filter_map(|kv| {
+            let kv = String::from_utf8_lossy(kv);
+            kv.split_once('=').map(|(k, _)| k.to_owned())
+        })
+        .collect();
+    for k in &foreign {
+        assert!(!names.contains(k), "{k} leaked into the browser: {names:?}");
+    }
+    assert!(names.iter().any(|k| k == "BX_PROFILE_ENV"), "{names:?}");
+    handle.shutdown_confirmed().await.unwrap();
+}
+
+/// The browser's DevTools port is the only TCP listener it opens, and it is
+/// bound to loopback on a kernel-chosen port: nothing off the host (and no
+/// well-known port) reaches an endpoint that has no authentication.
+#[tokio::test]
+async fn devtools_listens_on_loopback_only_on_a_random_port() {
+    let Some(exe) = chromium() else { return };
+    let temp = tempfile::tempdir().unwrap();
+    let handle = runtime(&exe, temp.path())
+        .launch(request(None))
+        .await
+        .unwrap();
+    let pid = handle.pid().unwrap();
+
+    let sockets: std::collections::BTreeSet<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .unwrap()
+        .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+        .filter_map(|t| {
+            let t = t.to_string_lossy().into_owned();
+            t.strip_prefix("socket:[")?
+                .strip_suffix(']')
+                .map(str::to_owned)
+        })
+        .collect();
+    // (local address, port) of every TCP socket in LISTEN state that this process holds.
+    let mut listeners: Vec<(String, u16)> = Vec::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        for line in std::fs::read_to_string(table).unwrap().lines().skip(1) {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() < 10 || cols[3] != "0A" || !sockets.contains(cols[9]) {
+                continue;
+            }
+            let (addr, port) = cols[1].rsplit_once(':').unwrap();
+            listeners.push((addr.to_owned(), u16::from_str_radix(port, 16).unwrap()));
+        }
+    }
+    assert!(!listeners.is_empty(), "no DevTools listener found");
+    for (addr, port) in &listeners {
+        // 0100007F is 127.0.0.1; the IPv6 loopback is ::1 (little-endian words).
+        let loopback = addr == "0100007F" || addr == "00000000000000000000000001000000";
+        assert!(
+            loopback,
+            "DevTools listens on {addr}:{port}, not on loopback"
+        );
+        assert!(*port > 1024 && *port != 9222, "port {port} is not random");
+    }
+    handle.shutdown_confirmed().await.unwrap();
+}
+
 #[tokio::test]
 async fn proxy_flags_reach_the_browser() {
     let Some(exe) = chromium() else { return };

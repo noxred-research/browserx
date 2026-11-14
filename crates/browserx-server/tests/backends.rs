@@ -33,7 +33,7 @@ async fn start_services() -> Option<Services> {
     let probe_password = password.clone();
     let pg = Service::start(
         &Spec {
-            image: "docker.io/library/postgres:18",
+            image: "docker.io/library/postgres:18@sha256:b9f6b8ff03b62f3cfd9d9ba3fe56226a9991c79d3fb46fd46536263bf02be553",
             ports: &[5432],
             env: &[&pg_env],
             tmpfs: &["/var/lib/postgresql"],
@@ -65,7 +65,7 @@ async fn start_services() -> Option<Services> {
     let secret_env = format!("AWS_SECRET_ACCESS_KEY={SECRET}");
     let s3 = Service::start(
         &Spec {
-            image: "docker.io/chrislusf/seaweedfs:latest",
+            image: "docker.io/chrislusf/seaweedfs:latest@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0",
             ports: &[8333],
             env: &[&key_env, &secret_env],
             tmpfs: &["/data"],

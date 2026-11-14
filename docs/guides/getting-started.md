@@ -25,7 +25,7 @@ The binary is `target/release/browserx`. The examples below assume it is on your
 browserx doctor
 ```
 
-`doctor` finds Chromium, launches it, reports its version and shuts it down with confirmation. Fix whatever it reports before you go on. Running as root in a container often needs a launch profile with `--no-sandbox`; see [launch profiles](launch-profiles.md#running-in-a-container).
+`doctor` finds Chromium, launches it, reports its version and shuts it down with confirmation. Fix whatever it reports before you go on. In a container the sandbox needs the seccomp profile from [launch profiles](launch-profiles.md#running-in-a-container); do not reach for `--no-sandbox` before you have read why.
 
 ## Configure
 
@@ -147,7 +147,7 @@ docker compose -f docker/compose.yaml run --rm --entrypoint browserx browserx ke
 docker compose -f docker/compose.yaml up --build
 ```
 
-The default container profile starts Chromium with `--no-sandbox` because container runtimes usually block the user namespaces its sandbox needs; the container is then the isolation boundary, so browse only content you trust, or run with a runtime profile that allows the sandbox and remove the flag. Allow the stop grace period (45 seconds in the Compose file) so final snapshots and confirmed browser shutdown can finish. The Docker files are for development and evaluation, see [SECURITY.md](../../SECURITY.md#supported-versions).
+The container keeps Chromium's sandbox on. Compose starts it with [`docker/seccomp-chromium.json`](../../docker/seccomp-chromium.json), the default Docker seccomp profile plus the user-namespace syscalls the sandbox needs; with `docker run` pass `--security-opt seccomp=docker/seccomp-chromium.json`. `--no-sandbox` is an explicit opt-in with a real cost, described in [SECURITY.md](../../SECURITY.md#deployment-requirements). Run one worker per container or network namespace and no other untrusted local users in it: the DevTools port and the forwarders trust every local process. Allow the stop grace period (45 seconds in the Compose file) so final snapshots and confirmed browser shutdown can finish. The Docker files are for development and evaluation, see [SECURITY.md](../../SECURITY.md#supported-versions).
 
 ## Where next
 

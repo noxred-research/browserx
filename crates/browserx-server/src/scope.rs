@@ -49,8 +49,9 @@ const INTERNAL_ID_END: i64 = 2_147_000_000;
 /// Upstream commands queued at most between two drains.
 const MAX_UPSTREAM_QUEUE: usize = 256;
 
-/// Protocol domains a page session may use. Anything else is refused.
-const PAGE_DOMAINS: &[&str] = &[
+/// Protocol domains a relay client may use (page sessions of a shared relay, and
+/// every session of a dedicated relay). Anything else is refused.
+pub(crate) const PAGE_DOMAINS: &[&str] = &[
     "Accessibility",
     "Animation",
     "Audits",

@@ -119,6 +119,8 @@ The CI runner hosts do not provide a browser for the job user, so the default te
 
 These workflow gates are defense in depth, not a sandbox: a pull request can change its own workflow. The repository settings are the authoritative control: workflows from forks need maintainer approval for every external contributor, Actions run only SHA-pinned allowlisted actions with a read-only default token, and `main` accepts only squash-merged pull requests with an approving code-owner review, resolved review threads and a green, up-to-date `required` check.
 
+**Maintainer rule: never approve a workflow run from a fork without first reading that pull request's diff of `.github/` and of the CI scripts it runs.** The authorization gate lives in a file the pull request can edit, so approving the run executes whatever the diff says on the project's runners. See [SECURITY.md](SECURITY.md#maintainer-rules).
+
 ## Getting help
 
 - Questions: the [docs](docs/README.md), then the question issue form.

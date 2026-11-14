@@ -115,7 +115,7 @@ Layout under `state_dir`:
 | `executable` | discovered | Browser executable. Absent: `BROWSERX_CHROMIUM_PATH`, then `chromium`, `chromium-browser`, `google-chrome`, `google-chrome-stable`, `chrome` on `PATH` |
 | `headless` | `true` | Run with `--headless=new` |
 | `args` | `[]` | Extra command-line flags. `{persona_seed}` is replaced with a stable per-identity number; see [launch profiles](launch-profiles.md#per-identity-seeds-persona_seed) |
-| `env` | `{}` | Extra environment variables for the browser process |
+| `env` | `{}` | Environment variables for the browser process, added to a small allow-list the browser inherits from the worker (`PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_*`, `TZ`, `XDG_*` directories, fontconfig and display variables). The rest of the worker's environment, including credentials, is not passed on |
 
 `args` may not set managed flags (`--remote-debugging-*`, `--user-data-dir`, `--proxy-server`, `--proxy-bypass-list`, `--proxy-pac-url`, `--proxy-auto-detect`, `--no-proxy-server`, `--headless`). Such a profile is rejected at startup. If no profile is defined, a `default` profile with the defaults above is created. See [launch profiles](launch-profiles.md).
 
