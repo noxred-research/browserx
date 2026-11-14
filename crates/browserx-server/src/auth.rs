@@ -48,6 +48,9 @@ impl Authenticator {
 }
 
 /// Hex SHA-256 of an API key, as stored in the configuration file.
+///
+/// API keys are 256-bit random tokens (`browserx keys`), not passwords, so a fast unsalted digest
+/// is the right fit: there is nothing to brute-force, and lookups stay constant time.
 #[must_use]
 pub fn key_digest(key: &str) -> String {
     hex::encode(Sha256::digest(key.as_bytes()))

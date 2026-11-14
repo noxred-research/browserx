@@ -325,8 +325,7 @@ impl Sealer {
     }
 
     fn seal_bytes(&self, mut meta: SnapshotMeta, plain: &[u8]) -> Result<Snapshot> {
-        let mut nonce_bytes = [0u8; NONCE_BYTES];
-        rand::rng().fill_bytes(&mut nonce_bytes);
+        let nonce_bytes: [u8; NONCE_BYTES] = rand::random();
         let nonce: Nonce<U12> = nonce_bytes.into();
         let aad = aad(&meta)?;
         let ciphertext = self
@@ -416,6 +415,15 @@ mod tests {
             matches!(err, Error::Crypto(m) if m.contains("newer")),
             "unexpected error"
         );
+    }
+
+    #[test]
+    fn every_seal_draws_a_fresh_nonce() {
+        let sealer = Sealer::new("00000000".into(), &Zeroizing::new([7u8; 32]));
+        let a = sealer.seal_bytes(meta(), b"{}").unwrap();
+        let b = sealer.seal_bytes(meta(), b"{}").unwrap();
+        assert_ne!(a.sealed[..NONCE_BYTES], b.sealed[..NONCE_BYTES]);
+        assert_ne!(a.sealed, b.sealed);
     }
 
     #[test]

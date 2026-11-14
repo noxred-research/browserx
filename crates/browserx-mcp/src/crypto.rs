@@ -227,8 +227,7 @@ impl StateBox {
     /// A box under a fresh random key.
     #[must_use]
     pub fn random() -> Self {
-        let mut key = [0_u8; 32];
-        rand::rng().fill_bytes(&mut key);
+        let key: [u8; 32] = rand::random();
         Self::from_key(&key)
     }
 
@@ -244,8 +243,7 @@ impl StateBox {
     /// Seals `plain` with `aad` bound; the result is URL-safe base64 of `nonce || ciphertext`.
     #[must_use]
     pub fn seal(&self, aad: &[u8], plain: &[u8]) -> String {
-        let mut nonce_bytes = [0_u8; NONCE_BYTES];
-        rand::rng().fill_bytes(&mut nonce_bytes);
+        let nonce_bytes: [u8; NONCE_BYTES] = rand::random();
         let nonce: Nonce<U12> = nonce_bytes.into();
         // Encryption of a bounded buffer cannot fail; an empty string would be refused on open.
         let ciphertext = self
@@ -364,6 +362,16 @@ mod tests {
         assert!(OperatorKeys::parse("a = zz").is_err());
         assert!(format!("{parsed:?}").contains("alpha"));
         assert!(!format!("{parsed:?}").contains(&line[8..]));
+    }
+
+    #[test]
+    fn every_seal_draws_a_fresh_nonce() {
+        let boxed = StateBox::random();
+        let decode = |s: &str| URL_SAFE_NO_PAD.decode(s).unwrap();
+        let a = decode(&boxed.seal(b"aad", b"hello"));
+        let b = decode(&boxed.seal(b"aad", b"hello"));
+        assert_ne!(a[..NONCE_BYTES], b[..NONCE_BYTES]);
+        assert_ne!(a, b);
     }
 
     #[test]

@@ -1126,7 +1126,11 @@ max_calls = 100
             "0123456789abcdef0123456789abcdef",
             "Zk3Hq9XpL2vB7nTr5WcYd8Ae",
         ] {
-            assert!(looks_secret(secret), "{secret}");
+            assert!(
+                looks_secret(secret),
+                "a secret-shaped value of {} bytes was not recognized",
+                secret.len()
+            );
         }
         for plain in [
             "hello",

@@ -207,7 +207,7 @@ async fn contract(port: u16, credentials: &Credentials) {
     assert!(second.latest(profile).await.unwrap().is_some());
 
     // Wrong credentials are refused with a typed error that does not echo them.
-    let wrong = credentials.file("not-the-password-0123456789");
+    let wrong = credentials.file(&format!("bxwrong{:016x}", rand::random::<u64>()));
     let bad = ObjectStore::connect(&config(port, &bucket, "browserx/", &wrong)).unwrap();
     match bad.ping().await {
         Err(ObjectError::Auth { .. }) => {}
