@@ -120,6 +120,19 @@ impl ProxyRoute {
     }
 }
 
+/// Reads the optional `profile_id` request field in either form: the prefixed
+/// form the API emits (`prf_` followed by the UUID) or the bare UUID.
+fn deserialize_profile_id<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<ProfileId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|raw| ProfileId::parse(&raw).map_err(serde::de::Error::custom))
+        .transpose()
+}
+
 /// A request for a new session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -136,7 +149,7 @@ pub struct SessionSpec {
     pub isolation: Isolation,
     /// Persistent identity to reuse (profile directory and/or snapshots). A new
     /// one is created when absent and persistence is not `ephemeral`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_profile_id")]
     pub profile_id: Option<ProfileId>,
     /// Upstream egress. `None` means direct egress from the worker.
     #[serde(default)]
@@ -268,5 +281,30 @@ mod tests {
         let parsed: std::result::Result<SessionSpec, _> =
             serde_json::from_str(r#"{"persistent": true}"#);
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn profile_id_accepts_prefixed_and_bare_forms() {
+        let id = ProfileId::new();
+        for text in [id.prefixed(), id.0.to_string(), id.0.simple().to_string()] {
+            let spec: SessionSpec =
+                serde_json::from_value(serde_json::json!({ "profile_id": text })).unwrap();
+            assert_eq!(spec.profile_id, Some(id), "{text}");
+        }
+        let none: SessionSpec = serde_json::from_str("{}").unwrap();
+        assert_eq!(none.profile_id, None);
+        let null: SessionSpec = serde_json::from_str(r#"{"profile_id": null}"#).unwrap();
+        assert_eq!(null.profile_id, None);
+    }
+
+    #[test]
+    fn profile_id_rejects_malformed_values() {
+        for bad in [
+            r#"{"profile_id": "prf_nope"}"#,
+            r#"{"profile_id": "ses_0"}"#,
+            r#"{"profile_id": 7}"#,
+        ] {
+            assert!(serde_json::from_str::<SessionSpec>(bad).is_err(), "{bad}");
+        }
     }
 }

@@ -8,7 +8,7 @@ The public listener (`server.listen`) serves a JSON API under `/v1` and a WebSoc
 - **Lease token.** Controller operations also carry the session's token in the `X-BrowserX-Token` header (or, for the relay, in the URL path). A wrong or stale token is `403 forbidden` on the `/v1` operations; on the relay it is `401 unauthorized`, the same answer as an unknown session. The token is checked before any session state is read, so a caller without it learns nothing about a session.
 - **Ownership.** An API key sees and operates only on the sessions and profiles it created. Another owner's session or profile id answers `404 not_found`, exactly as a missing one does.
 - **Bodies.** Request and response bodies are JSON. Request bodies reject unknown fields. `POST /v1/sessions` accepts an empty body (same as `{}`); `renew` and `handoff` need a body with `generation`.
-- **Identifiers.** `ses_...` (session), `prf_...` (profile). Both the prefixed form and the bare UUID are accepted in paths.
+- **Identifiers.** `ses_...` (session), `prf_...` (profile). Both the prefixed form and the bare UUID are accepted in paths and, for `profile_id`, in the create body.
 - **Timestamps.** RFC 3339, UTC.
 
 ## Objects
