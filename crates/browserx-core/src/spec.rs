@@ -284,17 +284,18 @@ mod tests {
     }
 
     #[test]
-    fn profile_id_accepts_prefixed_and_bare_forms() {
+    fn profile_id_accepts_prefixed_and_bare_forms() -> std::result::Result<(), serde_json::Error> {
         let id = ProfileId::new();
         for text in [id.prefixed(), id.0.to_string(), id.0.simple().to_string()] {
             let spec: SessionSpec =
-                serde_json::from_value(serde_json::json!({ "profile_id": text })).unwrap();
+                serde_json::from_value(serde_json::json!({ "profile_id": text }))?;
             assert_eq!(spec.profile_id, Some(id), "{text}");
         }
-        let none: SessionSpec = serde_json::from_str("{}").unwrap();
+        let none: SessionSpec = serde_json::from_str("{}")?;
         assert_eq!(none.profile_id, None);
-        let null: SessionSpec = serde_json::from_str(r#"{"profile_id": null}"#).unwrap();
+        let null: SessionSpec = serde_json::from_str(r#"{"profile_id": null}"#)?;
         assert_eq!(null.profile_id, None);
+        Ok(())
     }
 
     #[test]
