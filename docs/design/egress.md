@@ -7,7 +7,7 @@ browser --(--proxy-server=http://127.0.0.1:PORT)--> forwarder --> direct dial, o
                                                                   upstream http(s) / socks5(h) proxy --> destination
 ```
 
-The forwarder always exists for a dedicated session: with `proxy` unset it dials directly (after the destination policy); with `proxy` set it dials the upstream. Shared-browser sessions also get a forwarder, one per session and applying the same destination policy, but it always dials directly: a per-session `proxy` requires dedicated isolation. The relay refuses `Target.createBrowserContext` with `proxyServer` or `proxyBypassList`, so a client cannot route a context around the forwarder.
+The forwarder always exists for a dedicated session: with `proxy` unset it dials directly (after the destination policy); with `proxy` set it dials the upstream. Shared-browser sessions have no forwarder of their own: the shared browser process has one direct forwarder, started with it and applying the same destination policy for every context on that browser, and a per-session `proxy` requires dedicated isolation. The relay refuses `Target.createBrowserContext` with `proxyServer` or `proxyBypassList`, so a client cannot route a context around the forwarder.
 
 ## What the forwarder accepts
 
@@ -82,7 +82,7 @@ If you need strict private-range blocking for every destination, use direct egre
 Pools of rotating exits usually pin an exit by a token in the username. Two placeholders in `proxy.username` are substituted per connection:
 
 - `{session}` becomes an opaque per-session sticky key (not the session id), identical for every connection of the session, so every request takes the same exit;
-- `{generation}` becomes the lease generation, so a recovery or handoff, which increments it, naturally asks for a new exit.
+- `{generation}` becomes the lease generation when the forwarder is started, so a recovery, which starts a new forwarder with the incremented generation, naturally asks for a new exit. A handoff also increments the generation, but the running forwarder keeps the username it was started with.
 
 `pool-sid-{session}-g{generation}` on generation 3 becomes `pool-sid-<key>-g3`. A template without placeholders is sent as written. Passwords are not templated.
 
@@ -92,7 +92,7 @@ The browser is started with `--proxy-server=http://127.0.0.1:PORT` only. Upstrea
 
 ## Lifecycle
 
-The forwarder starts before the browser and stops after it. On recovery a new forwarder is started with the new generation, so the rendered username changes with it. When the session is released the forwarder shuts down and its counters (connections, bytes up, bytes down, refusals) are folded into metrics (`browserx_egress_refused_total`).
+The forwarder starts before the browser and stops after it. The rendered username is fixed when the forwarder starts: at creation, and again on recovery, when a new browser and a new forwarder are started with the new generation. A handoff increments the generation but leaves the running browser and its forwarder alone, so the username does not change. When the session is released the forwarder shuts down and its counters (connections, bytes up, bytes down, refusals) are folded into metrics (`browserx_egress_refused_total`).
 
 ## Limits
 

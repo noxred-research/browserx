@@ -71,7 +71,7 @@ Call `handoff` with the current generation, pass the returned token and `cdp_url
 
 Tools that accept a browser-level `ws://` URL attach through the `cdp_url` of a **dedicated** session; give them nothing else. Tools that launch their own browser need to be switched to "connect to an existing browser" mode. Two things to keep in mind:
 
-- The tool should not close the browser when it finishes (`Browser.close` ends the process; BrowserX will see the loss and recover it, or end the session if recovery is `none`). Close pages and contexts that the tool opened, then disconnect and call `release`.
+- The tool should not try to close the browser when it finishes: the relay refuses `Browser.close` (the command answers with a CDP error and the browser keeps running), because a browser is ended through the API. Close pages and contexts that the tool opened, then disconnect and release the session with `DELETE /v1/sessions/{id}`.
 - Per-session egress is configured in the session spec (`proxy`), not in the tool: the browser can only reach the network through the worker's forwarder.
 
 ## Checklist for an integration
