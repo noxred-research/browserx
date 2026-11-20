@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Fixed
 
 - **`profile_id` in a create request.** `POST /v1/sessions` (and `browserx session create --profile-id`) now accepts the `prf_...` form the API returns, so a returned profile id can be passed straight back to resume a profile or snapshot identity. The bare UUID is still accepted; a malformed value is `400 invalid_request`.
+- **Unknown fields inside `proxy`.** A misspelled field in the `proxy` object of a create request (for example `usrname`) is now refused with `400 invalid_request` instead of being silently ignored, as `docs/guides/api.md` already stated for request bodies.
 
 ## [0.1.0] - 2026-11-14
 
