@@ -311,14 +311,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_proxy_fields_are_refused() {
+    fn unknown_proxy_fields_are_refused() -> std::result::Result<(), serde_json::Error> {
         let parsed: std::result::Result<SessionSpec, _> =
             serde_json::from_str(r#"{"proxy": {"url": "http://proxy.test:8080", "usrname": "u"}}"#);
         assert!(parsed.is_err());
         let ok: SessionSpec = serde_json::from_str(
             r#"{"proxy": {"url": "http://proxy.test:8080", "username": "u", "password": "p"}}"#,
-        )
-        .unwrap();
+        )?;
         assert!(ok.proxy.is_some());
+        Ok(())
     }
 }
