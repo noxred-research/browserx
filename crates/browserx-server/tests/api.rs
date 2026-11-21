@@ -358,6 +358,37 @@ async fn error_mapping() {
     assert_eq!(code, 404);
 }
 
+/// Every `/v1` body is read into memory and parsed into a typed struct, so the size cap
+/// (256 KiB) is what bounds that work. A body one byte over it is refused before any
+/// parsing or session creation.
+#[tokio::test]
+async fn a_body_over_the_size_limit_is_refused_before_it_is_parsed() {
+    const LIMIT: usize = 256 * 1024;
+    let s = start_with_quota(1).await;
+    // A valid JSON object padded with whitespace, so only its size can be the reason.
+    let padded = |len: usize| format!("{{}}{}", " ".repeat(len - 2));
+    let r = s
+        .req(Method::POST, "/v1/sessions")
+        .header("content-type", "application/json")
+        .body(padded(LIMIT + 1))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 413);
+    let (code, body) = call(&s, Method::GET, "/v1/sessions", None, None).await;
+    assert_eq!(code, 200);
+    assert_eq!(body["sessions"].as_array().map(Vec::len), Some(0), "{body}");
+    // At the limit the same body is accepted and parsed.
+    let r = s
+        .req(Method::POST, "/v1/sessions")
+        .header("content-type", "application/json")
+        .body(padded(LIMIT))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201);
+}
+
 async fn start_with_quota(max: usize) -> TestServer {
     let fake = browserx_pool::testing::FakeRuntime::new();
     start_with(
