@@ -145,7 +145,7 @@ fn required_token(headers: &HeaderMap) -> Result<LeaseToken, Error> {
     token_from(headers)?.ok_or_else(|| Error::Forbidden("missing X-BrowserX-Token header".into()))
 }
 
-fn parse_body<T: DeserializeOwned>(body: &Bytes, empty: &str) -> Result<T, Error> {
+pub(crate) fn parse_body<T: DeserializeOwned>(body: &Bytes, empty: &str) -> Result<T, Error> {
     let bytes: &[u8] = if body.iter().all(u8::is_ascii_whitespace) {
         empty.as_bytes()
     } else {

@@ -195,10 +195,10 @@ pub(crate) fn parse_status(head: &[u8]) -> Option<u16> {
         return None;
     }
     let status = parts.next()?;
-    if status.len() != 3 {
+    if status.len() != 3 || !status.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    status.parse().ok()
+    status.parse().ok().filter(|code| *code >= 100)
 }
 
 /// Parses a host: IP literal (in WHATWG-style numeric forms too) or DNS name.
@@ -354,11 +354,14 @@ pub(crate) fn parse_absolute_http(target: &str) -> Result<AbsoluteTarget, &'stat
     let (host_text, port) = split_host_port(authority)?;
     let host = parse_host(host_text)?;
     let port = port.unwrap_or(80);
-    let path = match tail {
-        "" => "/".to_owned(),
-        t if t.starts_with('?') => format!("/{t}"),
-        t if t.starts_with('#') => "/".to_owned(),
-        t => t.split('#').next().unwrap_or("/").to_owned(),
+    // A fragment never goes on the wire, after a path or after a query.
+    let tail = tail.split('#').next().unwrap_or_default();
+    let path = if tail.is_empty() {
+        "/".to_owned()
+    } else if tail.starts_with('?') {
+        format!("/{tail}")
+    } else {
+        tail.to_owned()
     };
     let host_header = if port == 80 {
         host_text.to_ascii_lowercase()
@@ -504,6 +507,12 @@ mod tests {
         assert!(parse_absolute_http("https://example.test/").is_err());
         assert!(parse_absolute_http("http:///x").is_err());
         assert!(parse_absolute_http("http://user@example.test/").is_err());
+        let t = parse_absolute_http("http://example.test:8080?a=1#frag?b=2").unwrap();
+        assert_eq!(t.path, "/?a=1");
+        let t = parse_absolute_http("http://example.test/p?a=1#frag").unwrap();
+        assert_eq!(t.path, "/p?a=1");
+        let t = parse_absolute_http("http://example.test#frag").unwrap();
+        assert_eq!(t.path, "/");
     }
 
     #[test]
@@ -519,6 +528,10 @@ mod tests {
         assert_eq!(parse_status(b"HTTP/1.1 200\r\n\r\n"), Some(200));
         assert_eq!(parse_status(b"ICY 200 OK\r\n\r\n"), None);
         assert_eq!(parse_status(b"HTTP/1.1 2000 OK\r\n\r\n"), None);
+        // `u16::from_str` accepts a sign; a status code is three digits from 100.
+        assert_eq!(parse_status(b"HTTP/1.1 +12 OK\r\n\r\n"), None);
+        assert_eq!(parse_status(b"HTTP/1.1 000 OK\r\n\r\n"), None);
+        assert_eq!(parse_status(b"HTTP/1.1 099 OK\r\n\r\n"), None);
     }
 
     #[tokio::test]

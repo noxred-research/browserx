@@ -43,6 +43,8 @@
 //! trusted, or in its own network namespace.
 
 mod forwarder;
+#[doc(hidden)]
+pub mod fuzzing;
 mod http;
 mod policy;
 mod relay;

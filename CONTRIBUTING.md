@@ -87,6 +87,7 @@ All Rust follows the workspace lints in [`Cargo.toml`](Cargo.toml). On top of th
 - Tests that need Chromium detect it and skip with a printed `SKIP:` note otherwise; they must never fail merely because no browser is installed.
 - Test credentials are obviously synthetic. Do not commit key-shaped values that a scanner would flag: build them at runtime from split parts, with a comment that they are canaries. `gitleaks` runs in CI with detectors for `bxt_` lease tokens and `bxk_` API keys.
 - Never commit snapshot key files, browser profiles or recorded traffic.
+- **Fuzzing.** `fuzz/` is a cargo-fuzz workspace of its own, excluded from the main workspace, with one target per parser of untrusted input (request bodies of the HTTP API, identifiers, the forwarder's request and reply heads, proxy routes) and a small seed corpus under `fuzz/corpus/<target>/`. `cargo check --manifest-path fuzz/Cargo.toml --all-targets` builds the targets on stable, and a crash input replays on stable with `cargo run --manifest-path fuzz/Cargo.toml --bin <target> < <input>`. To fuzz, run `cargo install cargo-fuzz`, then `cargo +nightly fuzz run <target> corpus/<target>` from `fuzz/`. The `fuzz-short` CI job runs every target for 60 s on a pull request. A crash is a bug in the product code: fix it there, add a regression test, and keep the input as a seed.
 
 ## Documentation
 
