@@ -11,6 +11,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - **`profile_id` in a create request.** `POST /v1/sessions` (and `browserx session create --profile-id`) now accepts the `prf_...` form the API returns, so a returned profile id can be passed straight back to resume a profile or snapshot identity. The bare UUID is still accepted; a malformed value is `400 invalid_request`.
 - **Unknown fields inside `proxy`.** A misspelled field in the `proxy` object of a create request (for example `usrname`) is now refused with `400 invalid_request` instead of being silently ignored, as `docs/guides/api.md` already stated for request bodies.
 
+### Changed
+
+- CI: `deny.toml` records why RUSTSEC-2026-0543 (the `chrono` crate is reported as unmaintained; there is no vulnerability) is not ignored. BrowserX has no direct `chrono` dependency; only `rskafka` 0.6.0, the Kafka audit sink's client and the newest release, pulls it in, so `cargo deny` with `unmaintained = "workspace"` passes. Scanners that read `Cargo.lock` still report it. The note names the review date, 2026-12-31, and links the upstream issue ([influxdata/rskafka#311](https://github.com/influxdata/rskafka/issues/311)).
+
 ## [0.1.0] - 2026-11-14
 
 First public release. Source only: no binaries or images are published.
