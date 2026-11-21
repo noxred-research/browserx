@@ -74,6 +74,7 @@ pub enum RecoveryOutcome {
 /// to a loopback forwarder owned by the worker; the forwarder dials this route.
 /// Credentials never reach browser flags or logs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProxyRoute {
     /// `http://host:port`, `https://host:port` or `socks5://host:port`.
     /// The forwarder converts plain-HTTP requests into CONNECT tunnels, so
@@ -307,5 +308,17 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<SessionSpec>(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn unknown_proxy_fields_are_refused() -> std::result::Result<(), serde_json::Error> {
+        let parsed: std::result::Result<SessionSpec, _> =
+            serde_json::from_str(r#"{"proxy": {"url": "http://proxy.test:8080", "usrname": "u"}}"#);
+        assert!(parsed.is_err());
+        let ok: SessionSpec = serde_json::from_str(
+            r#"{"proxy": {"url": "http://proxy.test:8080", "username": "u", "password": "p"}}"#,
+        )?;
+        assert!(ok.proxy.is_some());
+        Ok(())
     }
 }

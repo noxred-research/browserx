@@ -267,6 +267,26 @@ async fn error_mapping() {
         (code, &body["error"]["code"]),
         (400, &json!("invalid_request"))
     );
+    // A misspelled nested proxy field is refused, not silently dropped, and the
+    // secret next to it is not echoed.
+    let (code, body) = call(
+        &s,
+        Method::POST,
+        "/v1/sessions",
+        None,
+        Some(json!({"proxy": {
+            "url": "http://gateway.test:8080",
+            "usrname": "synthetic-user",
+            "password": "synthetic-password"
+        }})),
+    )
+    .await;
+    assert_eq!(
+        (code, &body["error"]["code"]),
+        (400, &json!("invalid_request"))
+    );
+    assert!(body.to_string().contains("usrname"), "{body}");
+    assert!(!body.to_string().contains("synthetic-password"), "{body}");
     let (code, _) = call(&s, Method::GET, "/v1/sessions/not-an-id", None, None).await;
     assert_eq!(code, 400);
     let (code, _) = call(
