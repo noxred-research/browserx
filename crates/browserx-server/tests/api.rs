@@ -811,6 +811,67 @@ async fn snapshot_and_profile_endpoints() {
 }
 
 #[tokio::test]
+async fn returned_profile_id_can_be_reused_in_a_create_body() {
+    let s = start().await;
+    for mode in ["snapshot", "profile"] {
+        let created = s.create(json!({"persistence": mode})).await;
+        let id = created["session"]["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let token = created["token"].as_str().unwrap().to_owned();
+        let profile = created["session"]["profile_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(profile.starts_with("prf_"), "{mode}: {profile}");
+        let (code, body) = call(
+            &s,
+            Method::DELETE,
+            &format!("/v1/sessions/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+        assert_eq!(code, 200, "{mode}: {body}");
+
+        // The prefixed id the API returned is accepted back, as is the bare UUID.
+        let bare = profile.strip_prefix("prf_").unwrap().to_owned();
+        for reused in [profile.clone(), bare] {
+            let again = s
+                .create(json!({"persistence": mode, "profile_id": reused}))
+                .await;
+            assert_eq!(
+                again["session"]["profile_id"].as_str().unwrap(),
+                profile,
+                "{mode}: {reused}"
+            );
+            let id = again["session"]["session_id"].as_str().unwrap().to_owned();
+            let token = again["token"].as_str().unwrap().to_owned();
+            let (code, body) = call(
+                &s,
+                Method::DELETE,
+                &format!("/v1/sessions/{id}"),
+                Some(&token),
+                None,
+            )
+            .await;
+            assert_eq!(code, 200, "{mode}: {body}");
+        }
+    }
+
+    let (code, body) = call(
+        &s,
+        Method::POST,
+        "/v1/sessions",
+        None,
+        Some(json!({"persistence": "snapshot", "profile_id": "prf_not-a-uuid"})),
+    )
+    .await;
+    assert_eq!(code, 400, "{body}");
+}
+
+#[tokio::test]
 async fn launch_profiles_are_listed() {
     let s = start().await;
     let (code, body) = call(&s, Method::GET, "/v1/launch-profiles", None, None).await;
