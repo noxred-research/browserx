@@ -46,7 +46,7 @@ Some gateways accept only `CONNECT` and refuse ordinary absolute-form requests (
 A gateway that pins an exit by a token in the username (a pool with sticky sessions) is configured with the placeholders:
 
 - `{session}`: an opaque per-session sticky key. Every connection of the session sends the same value, so the gateway keeps one exit for the whole session.
-- `{generation}`: the lease generation. After a recovery or handoff the generation changes, so the gateway is asked for a new exit.
+- `{generation}`: the lease generation at the moment the forwarder starts, that is at creation and again after each recovery. After a recovery the generation has changed, so the gateway is asked for a new exit. A handoff increments the generation too but does not restart the forwarder, so the username it sends does not change.
 
 Pick the username grammar of *your* gateway and put the placeholders where it expects the sticky token. If you want an exit to survive recovery, leave `{generation}` out and keep only `{session}`.
 
@@ -64,7 +64,7 @@ The sticky key is derived per session; it is not the session id and is not a sec
 | The upstream is unreachable, does not resolve, or its address is blocked by the egress policy | Connection errors in the browser (`ERR_PROXY_CONNECTION_FAILED` or `ERR_TUNNEL_CONNECTION_FAILED`); `502 egress` with the same text, `upstream proxy is unavailable`, for every one of these causes |
 | A destination is blocked by policy | `403` from the forwarder with a short reason; counted in `browserx_egress_refused_total` |
 
-The forwarder does not retry by itself and does not rotate to another upstream. Rotation is a decision your client makes by creating a session with a different route, or by handoff and recovery changing `{generation}`.
+The forwarder does not retry by itself and does not rotate to another upstream. Rotation is a decision your client makes by creating a session with a different route; a recovery also asks for a new exit when the username contains `{generation}`.
 
 ## Verify what the browser sees
 
