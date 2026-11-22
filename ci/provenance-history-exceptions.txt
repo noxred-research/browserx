@@ -1,0 +1,10 @@
+# History identity exceptions for `ci/lint-provenance.py --history`.
+#
+# Each line is `<full 40-digit commit id> <line number in its message>` and exempts that one trailer line
+# from the identity checks (`identity` and `retired-name in identity`). They are `Co-authored-by` trailers of
+# commits already on `main` whose trailer names a private mail address; rewriting `main` would break every
+# clone. Nothing else about those commits is exempt: their author, committer, message text and files are
+# checked as usual, and so is every other trailer. Do not add entries for new commits: fix the trailer.
+5b478c98205c0542cbd2d35ed5af8cd9f759494b 60
+dba9275366d4f4380f3116e63a9c415b2dcd8e64 36
+90a2dc241830b38871c717e59f72f609174710b4 33

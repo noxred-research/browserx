@@ -25,9 +25,14 @@ Further rules:
 History mode (`--history`) applies the same rules to everything a clone can fetch: every ref
 name (branches, tags, `refs/pull/*`), every commit message, every tag annotation and every
 blob of every commit reachable from any ref, including its paths. It adds one rule,
-`identity`: an author, committer, tagger or trailer identity must be an account handle
-(letters, digits, `.`, `_`, `-`, optional `[bot]`) with a GitHub noreply address, never a
-personal name or a private mail address. Earlier versions of the hash file must hold only
+`identity`: an author, committer, tagger or trailer identity must carry a GitHub noreply address and an
+account handle (letters, digits, `.`, `_`, `-`, optional `[bot]`) or a plain display name (GitHub writes a
+squash merge's author from the account's profile name); a private mail address always fails, and no
+identity may carry a hashed retired term (`retired-name in identity`). Trailers of commits that were
+already published with a private address are listed one by one in
+`ci/provenance-history-exceptions.txt` (full commit id and message line): such a trailer line is exempt from
+the identity checks, and from nothing else about its commit. Earlier
+versions of the hash file must hold only
 well-formed rules (`hash-file`).
 
 Usage: ci/lint-provenance.py [PATH ...]
@@ -68,6 +73,8 @@ EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-
 EMAIL_OK_DOMAIN = re.compile(r"(?:^|\.)example(?:\.[a-z]+)?$|\.test$|\.invalid$|^localhost$", re.IGNORECASE)
 # History identities: an account handle (or bot) and a GitHub noreply address.
 IDENTITY_NAME = re.compile(r"^[A-Za-z0-9._-]+(?:\[bot\])?$")
+# A display name: letters and digits (any script), single inner spaces, dots, underscores, apostrophes and hyphens.
+DISPLAY_NAME = re.compile(r"^[^\W_](?:[^\W_]|[._'-]| (?! ))*(?:[^\W_]|\.)$")
 IDENTITY_MAIL = re.compile(r"^(?:[0-9]+\+)?[A-Za-z0-9._-]+(?:\[bot\])?@users\.noreply\.github\.com$|^(?:noreply|support)@github\.com$")
 TRAILER = re.compile(r"^(?:Signed-off-by|Co-authored-by|Reviewed-by|Acked-by|Tested-by|Reported-by|Suggested-by|Helped-by):\s*(.*?)\s*<([^<>]*)>\s*$", re.IGNORECASE)
 
@@ -220,11 +227,47 @@ def git_bytes(*args: str, stdin: bytes | None = None) -> bytes:
 
 
 def identity_ok(name: str, mail: str) -> bool:
-    return bool(IDENTITY_NAME.match(name) and IDENTITY_MAIL.match(mail))
+    """The mail must be a GitHub noreply address; the name an account handle or a plain display name.
+
+    GitHub writes the author of a squash or web merge from the account's profile name, so a display name
+    is accepted when, and only when, the mail is a noreply address. A private mail address fails whatever
+    the name is.
+    """
+    return bool(IDENTITY_MAIL.fullmatch(mail) and (IDENTITY_NAME.fullmatch(name) or DISPLAY_NAME.fullmatch(name)))
 
 
-def history(rules: Rules, report) -> None:
+def identity_names_retired_term(rules: Rules, name: str, mail: str) -> bool:
+    """A name or mail that carries a hashed term. A display name may hold several words, so it is checked like text."""
+    return rules.matches(name) or rules.matches(mail)
+
+
+def _history_exceptions() -> frozenset[tuple[str, int]]:
+    """`<40 hex digits of a commit id> <message line>` pairs of already published trailers, one per line.
+
+    A malformed line stops the lint with status 2 and a one-line message, like a malformed hash file.
+    """
+    path = Path(__file__).with_name("provenance-history-exceptions.txt")
+    pairs: set[tuple[str, int]] = set()
+    if path.is_file():
+        for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{40}", parts[0]) or not parts[1].isdigit():
+                print(f"lint-provenance: {path.name}:{number}: expected `<40 hex digits> <line number>`", file=sys.stderr)
+                raise SystemExit(2)
+            pairs.add((parts[0], int(parts[1])))
+    return frozenset(pairs)
+
+
+HISTORY_EXCEPTIONS = _history_exceptions()
+
+
+def history(rules: Rules, report, exceptions: frozenset[tuple[str, int]] | None = None) -> None:
     """Scan every ref name, commit, tag annotation and blob reachable from any ref."""
+    if exceptions is None:
+        exceptions = HISTORY_EXCEPTIONS
     # Ref names (a fetchable `refs/pull/*` counts as much as a branch).
     for ref in git_bytes("for-each-ref", "--format=%(refname)").decode().split():
         if rules.matches(ref):
@@ -239,13 +282,19 @@ def history(rules: Rules, report) -> None:
         for name, mail in ((an, ae), (cn, ce)):
             if not identity_ok(name, mail):
                 report(label, None, "identity")
+            if identity_names_retired_term(rules, name, mail):
+                report(label, None, "retired-name in identity")
         trailers: set[int] = set()
         for number, line in enumerate(body.splitlines(), 1):
             m = TRAILER.match(line)
             if m:
                 trailers.add(number)
+                if (oid, number) in exceptions:
+                    continue
                 if not identity_ok(m.group(1), m.group(2)):
                     report(label, number, "identity")
+                if identity_names_retired_term(rules, m.group(1), m.group(2)):
+                    report(label, number, "retired-name in identity")
         kept = "\n".join("" if n in trailers else line for n, line in enumerate(body.splitlines(), 1))
         check_text(rules, report, label, kept, handle_ok=True)
 
@@ -258,8 +307,11 @@ def history(rules: Rules, report) -> None:
         if not record:
             continue
         ref, tname, tmail, contents = record.split("\x1f", 3)
-        if tname and not identity_ok(tname, tmail):
-            report(f"tag {ref}", None, "identity")
+        if tname:
+            if not identity_ok(tname, tmail):
+                report(f"tag {ref}", None, "identity")
+            if identity_names_retired_term(rules, tname, tmail):
+                report(f"tag {ref}", None, "retired-name in identity")
         check_text(rules, report, f"tag {ref}", contents, handle_ok=True)
 
     # Blobs: every distinct object of every reachable tree, with every path it ever had.

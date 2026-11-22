@@ -202,6 +202,8 @@ jobs:
           persist-credentials: false
       - name: Provenance lint
         run: python3 ci/lint-provenance.py
+      - name: Provenance lint tests
+        run: python3 -B -m unittest discover -s ci -p 'test_lint_provenance.py'
       - name: Documentation links
         run: python3 ci/check-docs-links.py
       - name: Container images pinned by digest
