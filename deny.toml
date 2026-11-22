@@ -14,17 +14,13 @@ private = { ignore = true }
 [advisories]
 yanked = "deny"
 unmaintained = "workspace"
-# Each ignore names why the advisory does not apply and when to revisit it.
-# RUSTSEC-2026-0543 (chrono, unmaintained, no vulnerability) is deliberately NOT ignored here.
-# BrowserX has no direct `chrono` dependency: `rskafka` 0.6.0 (the Kafka audit sink of
-# browserx-mcp) pulls it in, and its public record type is `chrono::DateTime<Utc>`. With
-# `unmaintained = "workspace"` the advisory only applies to direct workspace dependencies, so
-# `cargo deny` passes, and an ignore entry would only warn `advisory-not-detected`. Scanners that
-# read `Cargo.lock` (OpenSSF Scorecard, OSV) still report it. Upstream issue:
-# https://github.com/influxdata/rskafka/issues/311.
-# REVIEW BY 2026-12-31: bump rskafka once a release drops chrono. If this crate ever gains a
-# direct chrono dependency, or the scope above is widened, add the ignore entry here with a
-# reason and the same expiry.
+# An ignore names why the advisory does not apply and when to revisit it. There is none now.
+# RUSTSEC-2026-0543 (chrono, unmaintained, no vulnerability) is not ignored and not present:
+# `rskafka` 0.6.0, the newest release and the Kafka audit sink of browserx-mcp, depends on
+# `chrono`, so the workspace patches it with `vendor/rskafka`, a copy that takes
+# `std::time::SystemTime` instead. `Cargo.lock` has no `chrono`. Upstream issue:
+# https://github.com/influxdata/rskafka/issues/311. Drop the patch once a release without
+# `chrono` exists.
 ignore = []
 
 [bans]

@@ -245,14 +245,6 @@ pub(crate) fn tls_config(ca_file: Option<&Path>) -> Result<Arc<rustls::ClientCon
     Ok(Arc::new(config))
 }
 
-/// The current time as a chrono timestamp (`rskafka` builds chrono without a clock).
-fn now_utc() -> rskafka::chrono::DateTime<rskafka::chrono::Utc> {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0));
-    rskafka::chrono::DateTime::from_timestamp_millis(millis).unwrap_or_default()
-}
-
 /// FNV-1a: a stable hash for choosing partitions.
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
@@ -427,7 +419,7 @@ impl Kafka {
                     key: Some(key.into_bytes()),
                     value: Some(body),
                     headers,
-                    timestamp: now_utc(),
+                    timestamp: std::time::SystemTime::now(),
                 },
                 size,
             ));

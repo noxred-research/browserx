@@ -6,6 +6,7 @@ FROM docker.io/library/rust:1.99-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878e
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY crates ./crates
+COPY vendor ./vendor
 # The MCP server embeds these at build time (include_str!).
 COPY docs ./docs
 COPY examples ./examples
