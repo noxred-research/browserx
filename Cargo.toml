@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["fuzz"]
+exclude = ["fuzz", "vendor/rskafka"]
 members = [
     # Shared vocabulary: identifiers, lease records, session specs, errors, service traits
     "crates/browserx-core",
@@ -96,3 +96,9 @@ webpki-roots = "1"
 [profile.release]
 lto = true
 codegen-units = 1
+
+[patch.crates-io]
+# rskafka 0.6.0 (the newest release) depends on `chrono`, which RUSTSEC-2026-0543 reports as
+# unmaintained. The vendored copy takes a `std::time::SystemTime` for record and offset
+# timestamps instead; see `vendor/rskafka/Cargo.toml`. Remove it once a release drops chrono.
+rskafka = { path = "vendor/rskafka" }

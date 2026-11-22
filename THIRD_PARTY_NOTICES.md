@@ -6,7 +6,13 @@ This inventory was compiled from the repository tree and each item's own metadat
 
 ## Rust dependencies
 
-BrowserX vendors no third-party source code. All Rust dependencies are fetched from crates.io at build time and pinned in [`Cargo.lock`](Cargo.lock); the workspace crates are `publish = false`.
+BrowserX vendors one third-party crate, `rskafka` (see below). All other Rust dependencies are fetched from crates.io at build time and pinned in [`Cargo.lock`](Cargo.lock); the workspace crates are `publish = false`.
+
+| Directory | Crate | Version | License (from `Cargo.toml`) | Upstream | License files present |
+| --- | --- | --- | --- | --- | --- |
+| `vendor/rskafka/` | `rskafka` | 0.6.0 | `MIT OR Apache-2.0` | <https://github.com/influxdata/rskafka> | `LICENSE-MIT` and `LICENSE-APACHE` |
+
+`rskafka` replaces its crates.io counterpart through `[patch.crates-io]` in `Cargo.toml` and is excluded from the workspace member list. The local changes remove its `chrono` dependency (the crate is reported as unmaintained, RUSTSEC-2026-0543): record and offset timestamps are `std::time::SystemTime`, with public millisecond conversion helpers; a record's `timestamp_delta` in a produce request is floor(ms) minus floor(first ms), which differs from upstream's truncated difference by at most 1 ms for sub-millisecond inputs; `dead_code` is allowed; the crate documentation replaces the README include; four comments are reworded. The header of `vendor/rskafka/Cargo.toml` lists every change. The upstream manifest is kept as `vendor/rskafka/Cargo.toml.upstream`; the upstream tests, benchmarks and CI files are not vendored. Copyright (c) 2020 InfluxData.
 
 The set of licenses a dependency may carry is enforced in CI by `cargo deny` using [`deny.toml`](deny.toml). The allowed licenses are Apache-2.0 (also with the LLVM exception), MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, Zlib, MPL-2.0, CC0-1.0, BSL-1.0 and CDLA-Permissive-2.0. A dependency under any other license fails the build.
 
