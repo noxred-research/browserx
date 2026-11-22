@@ -21,6 +21,8 @@ mod auth;
 mod config;
 mod dto;
 mod error;
+#[doc(hidden)]
+pub mod fuzzing;
 pub mod hardening;
 pub mod host_policy;
 mod limits;

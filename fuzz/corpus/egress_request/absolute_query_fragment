@@ -1,0 +1,4 @@
+GET http://example.te01619160323812382st:8?0/c8#0/b?=d HTTP/1.1
+Host: exa080
+Accept: */*
+

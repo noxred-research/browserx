@@ -1,0 +1,4 @@
+GET http://example.test:8080/a/b?c=d HTTP/1.1
+Host: example.test:8080
+Accept: */*
+

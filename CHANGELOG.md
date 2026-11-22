@@ -6,8 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- **Fuzzing.** `fuzz/` is a cargo-fuzz workspace with four libFuzzer targets, one per parser of untrusted input: the request bodies of the HTTP API (`session_body`: create, renew and handoff), session and profile identifiers (`id_parse`), the loopback forwarder's request head, `CONNECT` authority, absolute-form target, upstream reply status and `allow_cidrs` entries (`egress_request`), and the `proxy` object of a create request (`proxy_route`). Each has a seed corpus and asserts invariants (an accepted body survives a re-encode, an accepted identifier re-parses from its own text, a normalized destination parses back to itself), not only that nothing panics. The new `fuzz-short` CI job runs every target for 60 s from its corpus on each pull request and for 10 min nightly, on the self-hosted runners. The parsers are reached through `#[doc(hidden)]` `fuzzing` modules of `browserx-server` and `browserx-egress`; they are not part of the API.
+
 ### Fixed
 
+- **Upstream proxy status line.** The forwarder read the status code of an upstream proxy's reply with `u16::from_str`, which accepts a sign: `HTTP/1.1 +12 ...` was read as status 12. The status must now be three digits and at least 100, otherwise the reply is refused as malformed. Found by the new `egress_request` fuzz target.
+- **Fragment after a query in an absolute-form target.** A plain-HTTP request through the forwarder such as `GET http://host/?a=1#frag` was sent to the origin with its fragment (`/?a=1#frag`); only a fragment after a path was dropped. The fragment is now dropped in every case. Found by the new `egress_request` fuzz target.
 - **`profile_id` in a create request.** `POST /v1/sessions` (and `browserx session create --profile-id`) now accepts the `prf_...` form the API returns, so a returned profile id can be passed straight back to resume a profile or snapshot identity. The bare UUID is still accepted; a malformed value is `400 invalid_request`.
 - **Unknown fields inside `proxy`.** A misspelled field in the `proxy` object of a create request (for example `usrname`) is now refused with `400 invalid_request` instead of being silently ignored, as `docs/guides/api.md` already stated for request bodies.
 
